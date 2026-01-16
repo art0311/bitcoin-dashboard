@@ -58,7 +58,10 @@ col1, col2, col3 = st.columns(3)
 price = btc['Close'].iloc[-1]
 change_24h = btc['Close'].pct_change().iloc[-1] * 100
 
-col1.metric("BTC Price (USD)", f"${price:,.0f}", f"{change_24h:.2f}%")
+price_display = f"${price:,.0f}" if pd.notna(price) else "Loading..."
+change_display = f"{change_24h:.2f}%" if pd.notna(change_24h) else ""
+
+col1.metric("BTC Price (USD)", price_display, change_display)
 col2.metric("50D SMA", f"${btc['SMA_50'].iloc[-1]:,.0f}")
 col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}")
 
