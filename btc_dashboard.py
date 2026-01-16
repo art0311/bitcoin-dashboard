@@ -4,6 +4,8 @@ import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import datetime
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 
 st.set_page_config(page_title="Bitcoin Live Dashboard", layout="wide")
 
@@ -13,6 +15,7 @@ st.set_page_config(page_title="Bitcoin Live Dashboard", layout="wide")
 st.sidebar.title("⚙️ Settings")
 symbol = st.sidebar.selectbox("Asset", ["BTC-USD"], index=0)
 period = st.sidebar.selectbox("Time Range", ["1y", "2y", "5y", "max"], index=0)
+predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
 
 # -----------------------------
 # Data Loader
@@ -132,6 +135,44 @@ else:
     st.info("Loading RSI...")
 
 # -----------------------------
+# AI Prediction Models
+# -----------------------------
+st.subheader("🤖 AI Price Predictions")
+
+if len(btc) > 100:
+    df = btc.copy()
+    df['t'] = np.arange(len(df))
+
+    X = df[['t']]
+    y = df['Close']
+
+    # Linear Regression Model
+    lr = LinearRegression()
+    lr.fit(X, y)
+
+    # Random Forest Model
+    rf = RandomForestRegressor(n_estimators=200, random_state=42)
+    rf.fit(X, y)
+
+    future_t = np.arange(len(df), len(df) + predict_days).reshape(-1, 1)
+
+    lr_pred = lr.predict(future_t)
+    rf_pred = rf.predict(future_t)
+
+    future_dates = pd.date_range(df.index[-1], periods=predict_days+1, freq='D')[1:]
+
+    fig4, ax4 = plt.subplots(figsize=(12, 4))
+    ax4.plot(df.index, df['Close'], label='Historical')
+    ax4.plot(future_dates, lr_pred, label='Linear Regression Forecast')
+    ax4.plot(future_dates, rf_pred, label='Random Forest Forecast')
+    ax4.legend()
+    st.pyplot(fig4)
+
+    st.caption("⚠️ AI forecasts are experimental and not financial advice.")
+else:
+    st.info("Not enough data for AI predictions yet.")
+
+# -----------------------------
 # Trend Projection
 # -----------------------------
 st.subheader("🔮 Short-Term Trend Projection")
@@ -149,5 +190,6 @@ if len(btc) > 30:
     st.pyplot(fig3)
 else:
     st.info("Not enough data for projection.")
+
 
 
