@@ -43,13 +43,42 @@ if not btc.empty:
     btc['RSI'] = 100 - (100 / (1 + rs))
 
 # -----------------------------
+# Support & Resistance Detection
+# -----------------------------
+def detect_levels(series, window=20, tolerance=0.015):
+    prices = series.values
+    levels = []
+
+    for i in range(window, len(prices) - window):
+        low_range = prices[i-window:i+window]
+        current = prices[i]
+
+        if current == low_range.min():
+            levels.append(current)
+        elif current == low_range.max():
+            levels.append(current)
+
+    # Cluster similar levels
+    levels = sorted(levels)
+    clustered = []
+    for level in levels:
+        if not clustered:
+            clustered.append(level)
+        elif abs(level - clustered[-1]) / clustered[-1] > tolerance:
+            clustered.append(level)
+
+    return clustered
+
+levels = detect_levels(btc['Close']) if not btc.empty else []
+
+# -----------------------------
 # Header
 # -----------------------------
 st.title("📊 Bitcoin Live Market Dashboard")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
 # -----------------------------
-# Metrics (CRASH-PROOF)
+# Metrics
 # -----------------------------
 col1, col2, col3 = st.columns(3)
 
@@ -67,15 +96,19 @@ else:
     col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}")
 
 # -----------------------------
-# Price Chart
+# Price Chart with Support & Resistance
 # -----------------------------
-st.subheader("📈 Price Chart")
+st.subheader("📈 Price Chart + Support & Resistance")
 
 if not btc.empty:
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc['Close'], label='Price')
     ax.plot(btc.index, btc['SMA_50'], label='SMA 50')
     ax.plot(btc.index, btc['SMA_200'], label='SMA 200')
+
+    for level in levels[-8:]:
+        ax.axhline(level, linestyle='--', alpha=0.4)
+
     ax.legend()
     ax.set_ylabel("USD")
     st.pyplot(fig)
@@ -99,7 +132,7 @@ else:
     st.info("Loading RSI...")
 
 # -----------------------------
-# Simple Forecast (Trend Projection)
+# Trend Projection
 # -----------------------------
 st.subheader("🔮 Short-Term Trend Projection")
 
@@ -116,4 +149,5 @@ if len(btc) > 30:
     st.pyplot(fig3)
 else:
     st.info("Not enough data for projection.")
+
 
