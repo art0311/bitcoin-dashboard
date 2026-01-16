@@ -53,22 +53,19 @@ st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 # -----------------------------
 # Metrics
 # -----------------------------
-price = btc['Close'].iloc[-1]
 
-if len(latest) < 2:
-    price_display = "Loading..."
-    change_display = ""
+if btc is None or btc.empty or len(btc) < 2:
+    col1.metric("BTC Price (USD)", "Loading...", "")
+    col2.metric("50D SMA", "Loading...")
+    col3.metric("200D SMA", "Loading...")
 else:
-    price = float(latest['Close'].iloc[-1])
-    prev = float(latest['Close'].iloc[-2])
+    price = float(btc['Close'].iloc[-1])
+    prev = float(btc['Close'].iloc[-2])
     change = ((price - prev) / prev) * 100
 
-    price_display = f"${price:,.0f}"
-    change_display = f"{change:.2f}%"
-
-col1.metric("BTC Price (USD)", price_display, change_display)
-col2.metric("50D SMA", f"${btc['SMA_50'].iloc[-1]:,.0f}")
-col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}")
+    col1.metric("BTC Price (USD)", f"${price:,.0f}", f"{change:.2f}%")
+    col2.metric("50D SMA", f"${btc['SMA_50'].iloc[-1]:,.0f}")
+    col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}")
 
 # -----------------------------
 # Price Chart
