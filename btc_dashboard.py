@@ -24,6 +24,49 @@ period = st.sidebar.selectbox(
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
 
 # -----------------------------
+# Crypto Fear & Greed Index (Gauge)
+# -----------------------------
+import requests
+import plotly.graph_objects as go
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧠 Market Sentiment")
+
+def fetch_fng():
+    try:
+        url = "https://api.alternative.me/fng/"
+        r = requests.get(url)
+        data = r.json()['data'][0]
+        value = int(data['value'])
+        label = data['value_classification']
+        return value, label
+    except:
+        return None, "N/A"
+
+sentiment_score, sentiment_label = fetch_fng()
+
+if sentiment_score is not None:
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=sentiment_score,
+        gauge={
+            'axis': {'range': [0, 100]},
+            'bar': {'color': "darkblue"},
+            'steps': [
+                {'range': [0, 24], 'color': 'red'},         # Extreme Fear
+                {'range': [25, 49], 'color': 'orange'},     # Fear
+                {'range': [50, 50], 'color': 'yellow'},     # Neutral
+                {'range': [51, 74], 'color': 'lightgreen'}, # Greed
+                {'range': [75, 100], 'color': 'green'}      # Extreme Greed
+            ],
+        },
+        title={'text': sentiment_label}
+    ))
+    st.sidebar.plotly_chart(fig, use_container_width=True)
+else:
+    st.sidebar.info("Could not fetch sentiment data.")
+
+# -----------------------------
 # Data Loader
 # -----------------------------
 @st.cache_data(ttl=120)
