@@ -14,7 +14,13 @@ st.set_page_config(page_title="Bitcoin Live Dashboard", layout="wide")
 # -----------------------------
 st.sidebar.title("⚙️ Settings")
 symbol = st.sidebar.selectbox("Asset", ["BTC-USD"], index=0)
-period = st.sidebar.selectbox("Time Range", ["1y", "2y", "5y", "max"], index=0)
+
+period = st.sidebar.selectbox(
+    "Time Range",
+    ["1d", "7d", "1mo", "1y", "2y", "5y", "max"],  # Added 1d, 7d, 1mo
+    index=3
+)
+
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
 
 # -----------------------------
@@ -33,17 +39,20 @@ def load_data(symbol, period):
 btc = load_data(symbol, period)
 
 # -----------------------------
-# Indicators
+# Indicators (Crash-proof)
 # -----------------------------
-if not btc.empty:
-    btc['SMA_50'] = btc['Close'].rolling(50).mean()
-    btc['SMA_200'] = btc['Close'].rolling(200).mean()
+if not btc.empty and len(btc) > 1:
+    if len(btc) >= 50:
+        btc['SMA_50'] = btc['Close'].rolling(50).mean()
+    if len(btc) >= 200:
+        btc['SMA_200'] = btc['Close'].rolling(200).mean()
 
-    delta = btc['Close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    rs = gain.rolling(14).mean() / loss.rolling(14).mean()
-    btc['RSI'] = 100 - (100 / (1 + rs))
+    if len(btc) >= 15:
+        delta = btc['Close'].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        rs = gain.rolling(14).mean() / loss.rolling(14).mean()
+        btc['RSI'] = 100 - (100 / (1 + rs))
 
 # -----------------------------
 # Support & Resistance Detection
@@ -61,7 +70,6 @@ def detect_levels(series, window=20, tolerance=0.015):
         elif current == low_range.max():
             levels.append(current)
 
-    # Cluster similar levels
     levels = sorted(levels)
     clustered = []
     for level in levels:
@@ -95,8 +103,8 @@ else:
     change = ((price - prev) / prev) * 100
 
     col1.metric("BTC Price (USD)", f"${price:,.0f}", f"{change:.2f}%")
-    col2.metric("50D SMA", f"${btc['SMA_50'].iloc[-1]:,.0f}")
-    col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}")
+    col2.metric("50D SMA", f"${btc['SMA_50'].iloc[-1]:,.0f}" if 'SMA_50' in btc else "N/A")
+    col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}" if 'SMA_200' in btc else "N/A")
 
 # -----------------------------
 # Price Chart with Support & Resistance
@@ -106,8 +114,11 @@ st.subheader("📈 Price Chart + Support & Resistance")
 if not btc.empty:
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc['Close'], label='Price')
-    ax.plot(btc.index, btc['SMA_50'], label='SMA 50')
-    ax.plot(btc.index, btc['SMA_200'], label='SMA 200')
+
+    if 'SMA_50' in btc:
+        ax.plot(btc.index, btc['SMA_50'], label='SMA 50')
+    if 'SMA_200' in btc:
+        ax.plot(btc.index, btc['SMA_200'], label='SMA 200')
 
     for level in levels[-8:]:
         ax.axhline(level, linestyle='--', alpha=0.4)
@@ -123,7 +134,7 @@ else:
 # -----------------------------
 st.subheader("📉 RSI Indicator")
 
-if not btc.empty:
+if not btc.empty and 'RSI' in btc:
     fig2, ax2 = plt.subplots(figsize=(12, 3))
     ax2.plot(btc.index, btc['RSI'])
     ax2.axhline(70, linestyle='--')
@@ -132,7 +143,7 @@ if not btc.empty:
     ax2.set_ylabel("RSI")
     st.pyplot(fig2)
 else:
-    st.info("Loading RSI...")
+    st.info("Not enough data for RSI.")
 
 # -----------------------------
 # AI Prediction Models
@@ -146,11 +157,9 @@ if len(btc) > 100:
     X = df[['t']]
     y = df['Close']
 
-    # Linear Regression Model
     lr = LinearRegression()
     lr.fit(X, y)
 
-    # Random Forest Model
     rf = RandomForestRegressor(n_estimators=200, random_state=42)
     rf.fit(X, y)
 
@@ -167,7 +176,6 @@ if len(btc) > 100:
     ax4.plot(future_dates, rf_pred, label='Random Forest Forecast')
     ax4.legend()
     st.pyplot(fig4)
-
     st.caption("⚠️ AI forecasts are experimental and not financial advice.")
 else:
     st.info("Not enough data for AI predictions yet.")
@@ -190,6 +198,7 @@ if len(btc) > 30:
     st.pyplot(fig3)
 else:
     st.info("Not enough data for projection.")
+
 
 
 
