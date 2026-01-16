@@ -53,13 +53,14 @@ st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 # -----------------------------
 # Metrics
 # -----------------------------
-col1, col2, col3 = st.columns(3)
+latest_row = btc.iloc[-1]
 
-price = btc['Close'].iloc[-1]
-change_24h = btc['Close'].pct_change().iloc[-1] * 100
+price = float(latest_row['Close']) if not pd.isna(latest_row['Close']) else None
+prev_price = float(btc['Close'].iloc[-2]) if len(btc) > 1 else None
+change_24h = ((price - prev_price) / prev_price * 100) if price and prev_price else None
 
-price_display = f"${price:,.0f}" if pd.notna(price) else "Loading..."
-change_display = f"{change_24h:.2f}%" if pd.notna(change_24h) else ""
+price_display = f"${price:,.0f}" if price is not None else "Loading..."
+change_display = f"{change_24h:.2f}%" if change_24h is not None else ""
 
 col1.metric("BTC Price (USD)", price_display, change_display)
 col2.metric("50D SMA", f"${btc['SMA_50'].iloc[-1]:,.0f}")
