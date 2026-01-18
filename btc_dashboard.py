@@ -94,7 +94,11 @@ def load_data(symbol, period):
 # -----------------------------
 # Indicators (fully crash-proof)
 # -----------------------------
-if not btc.empty and len(btc) > 1:
+# Check that we have data and required columns
+def has_data(df, cols):
+    return not df.empty and all(col in df.columns for col in cols)
+
+if has_data(btc, ['Close', 'High', 'Low', 'Volume']):
     close = btc['Close'].to_numpy(dtype=float)
     high = btc['High'].to_numpy(dtype=float)
     low = btc['Low'].to_numpy(dtype=float)
@@ -115,16 +119,8 @@ if not btc.empty and len(btc) > 1:
         btc['RSI'] = (100 - (100 / (1 + rs))).to_numpy()
 
     # VWAP
-if not btc.empty and all(x in btc.columns for x in ['Close', 'High', 'Low', 'Volume']):
-    close = btc['Close'].to_numpy(dtype=float)
-    high = btc['High'].to_numpy(dtype=float)
-    low = btc['Low'].to_numpy(dtype=float)
-    volume = btc['Volume'].to_numpy(dtype=float)
     typical_price = (high + low + close) / 3
     btc['VWAP'] = (typical_price * volume).cumsum() / volume.cumsum()
-else:
-    btc['VWAP'] = np.nan
-
 
     # OBV
     obv = np.zeros(len(close))
@@ -136,6 +132,11 @@ else:
         else:
             obv[i] = obv[i-1]
     btc['OBV'] = obv
+else:
+    # Ensure columns exist so downstream code doesn't break
+    for col in ['SMA_50','SMA_200','RSI','VWAP','OBV']:
+        btc[col] = np.nan
+
 
 # -----------------------------
 # Support & Resistance Detection
