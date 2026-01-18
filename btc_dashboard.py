@@ -4,8 +4,6 @@ import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import datetime
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
 import requests
 import plotly.graph_objects as go
 
@@ -26,7 +24,7 @@ period = st.sidebar.selectbox("Time Range", ["1d", "7d", "1mo", "1y", "2y", "5y"
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
 
 # -----------------------------
-# Crypto Fear & Greed Gauge
+# Fear & Greed Gauge
 # -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧠 Market Sentiment")
@@ -60,12 +58,11 @@ else:
     st.sidebar.info("Could not fetch sentiment data.")
 
 # -----------------------------
-# Data Loader
+# Load Data
 # -----------------------------
 @st.cache_data(ttl=120)
 def load_data(symbol, period):
     try:
-        # Short-term intervals
         if period == "1d":
             df = yf.download(symbol, period=period, interval="5m", progress=False)
         elif period == "7d":
@@ -95,50 +92,61 @@ if has_data(btc, ['Close','High','Low','Volume']) and len(btc) > 1:
     high = btc['High'].to_numpy(dtype=float)
     low = btc['Low'].to_numpy(dtype=float)
     volume = btc['Volume'].to_numpy(dtype=float)
+    n = len(close)
 
-    # Adaptive SMA
-    sma_short = min(5, len(close))
-    sma_medium = min(20, len(close))
-    sma_long = min(50, len(close))
-    btc['SMA_short'] = pd.Series(close).rolling(sma_short).mean()
-    btc['SMA_medium'] = pd.Series(close).rolling(sma_medium).mean()
-    btc['SMA_long'] = pd.Series(close).rolling(sma_long).mean()
+    # -----------------
+    # SMA
+    # -----------------
+    btc['SMA_short'] = pd.Series(close).rolling(max(3, min(5,n))).mean()
+    btc['SMA_medium'] = pd.Series(close).rolling(max(5, min(20,n))).mean()
+    btc['SMA_long'] = pd.Series(close).rolling(max(10, min(50,n))).mean()
 
-    # Adaptive Bollinger Bands (min 3 for short ranges)
-    bb_window = max(3, min(20,len(close)))
-    sma20 = pd.Series(close).rolling(bb_window).mean()
-    std20 = pd.Series(close).rolling(bb_window).std()
-    btc['BB_upper'] = sma20 + 2*std20
-    btc['BB_lower'] = sma20 - 2*std20
+    # -----------------
+    # Bollinger Bands
+    # -----------------
+    bb_window = max(3,min(20,n))
+    sma_bb = pd.Series(close).rolling(bb_window).mean()
+    std_bb = pd.Series(close).rolling(bb_window).std()
+    btc['BB_upper'] = sma_bb + 2*std_bb
+    btc['BB_lower'] = sma_bb - 2*std_bb
 
-    # Adaptive RSI
-    rsi_window = max(3, min(14,len(close)-1))
+    # -----------------
+    # RSI
+    # -----------------
+    rsi_window = max(3, min(14, n-1))
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     rs = gain.rolling(rsi_window).mean() / loss.rolling(rsi_window).mean()
     btc['RSI'] = 100 - (100 / (1 + rs))
 
+    # -----------------
     # VWAP
+    # -----------------
     typical_price = (high+low+close)/3
     btc['VWAP'] = (typical_price*volume).cumsum() / volume.cumsum()
 
+    # -----------------
     # OBV
-    obv = np.zeros(len(close))
-    for i in range(1,len(close)):
-        if close[i]>close[i-1]: obv[i]=obv[i-1]+volume[i]
-        elif close[i]<close[i-1]: obv[i]=obv[i-1]-volume[i]
-        else: obv[i]=obv[i-1]
-    btc['OBV']=obv
+    # -----------------
+    obv = np.zeros(n)
+    for i in range(1,n):
+        if close[i]>close[i-1]: obv[i] = obv[i-1] + volume[i]
+        elif close[i]<close[i-1]: obv[i] = obv[i-1] - volume[i]
+        else: obv[i] = obv[i-1]
+    btc['OBV'] = obv
 
-    # Adaptive MACD
-    if period in ['1d','7d']:  # short intraday: smaller spans
-        fast_span, slow_span, signal_span = 3, 6, 2
+    # -----------------
+    # MACD
+    # -----------------
+    if period in ['1d','7d']:
+        fast_span, slow_span, signal_span = max(2,min(3,n//2)), max(3,min(6,n)), max(2, min(3,n))
     else:
-        fast_span, slow_span, signal_span = 12, 26, 9
-
-    btc['MACD'] = pd.Series(close).ewm(span=fast_span,adjust=False).mean() - pd.Series(close).ewm(span=slow_span,adjust=False).mean()
-    btc['MACD_Signal'] = btc['MACD'].ewm(span=signal_span,adjust=False).mean()
+        fast_span, slow_span, signal_span = 12,26,9
+    ema_fast = pd.Series(close).ewm(span=fast_span, adjust=False).mean()
+    ema_slow = pd.Series(close).ewm(span=slow_span, adjust=False).mean()
+    btc['MACD'] = ema_fast - ema_slow
+    btc['MACD_Signal'] = btc['MACD'].ewm(span=signal_span, adjust=False).mean()
     btc['MACD_Hist'] = btc['MACD'] - btc['MACD_Signal']
 
 else:
@@ -152,8 +160,8 @@ def detect_levels(series, window=20, tolerance=0.015):
     prices = series.to_numpy(dtype=float)
     levels=[]
     for i in range(window,len(prices)-window):
-        low_range=prices[i-window:i+window]
-        current=prices[i]
+        low_range = prices[i-window:i+window]
+        current = prices[i]
         if current==low_range.min() or current==low_range.max(): levels.append(current)
     clustered=[]
     for l in levels:
@@ -171,42 +179,49 @@ st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 # Metrics
 col1,col2,col3 = st.columns(3)
 if has_data(btc,['Close']):
-    price=float(btc['Close'].iloc[-1])
-    prev=float(btc['Close'].iloc[-2])
-    change=(price-prev)/prev*100
+    price = float(btc['Close'].iloc[-1])
+    prev = float(btc['Close'].iloc[-2])
+    change = (price-prev)/prev*100
     col1.metric("BTC Price",f"${price:,.0f}",f"{change:.2f}%")
     col2.metric("SMA Short",f"${btc['SMA_short'].iloc[-1]:,.0f}")
     col3.metric("SMA Medium",f"${btc['SMA_medium'].iloc[-1]:,.0f}")
 else:
     col1.metric("BTC Price","Loading..."); col2.metric("SMA Short","Loading..."); col3.metric("SMA Medium","Loading...")
 
-# Price + Indicators
+# -----------------------------
+# Price + Indicators Chart
+# -----------------------------
 st.subheader("📈 Price + Indicators")
 if has_data(btc,['Close']):
     fig,ax = plt.subplots(figsize=(12,5))
     ax.plot(btc.index,btc['Close'],label='Price')
-    if 'SMA_short' in btc: ax.plot(btc.index,btc['SMA_short'],label='SMA Short')
-    if 'SMA_medium' in btc: ax.plot(btc.index,btc['SMA_medium'],label='SMA Medium')
-    if 'SMA_long' in btc: ax.plot(btc.index,btc['SMA_long'],label='SMA Long')
-    if 'VWAP' in btc: ax.plot(btc.index,btc['VWAP'],label='VWAP',linestyle='--')
-    if 'BB_upper' in btc and 'BB_lower' in btc:
-        ax.plot(btc.index,btc['BB_upper'],label='BB Upper',linestyle='--',alpha=0.5)
-        ax.plot(btc.index,btc['BB_lower'],label='BB Lower',linestyle='--',alpha=0.5)
+    ax.plot(btc.index,btc['SMA_short'],label='SMA Short')
+    ax.plot(btc.index,btc['SMA_medium'],label='SMA Medium')
+    ax.plot(btc.index,btc['SMA_long'],label='SMA Long')
+    ax.plot(btc.index,btc['VWAP'],label='VWAP',linestyle='--')
+    ax.plot(btc.index,btc['BB_upper'],label='BB Upper',linestyle='--',alpha=0.5)
+    ax.plot(btc.index,btc['BB_lower'],label='BB Lower',linestyle='--',alpha=0.5)
     for lvl in levels[-8:]: ax.axhline(lvl,linestyle='--',alpha=0.4)
     ax.legend(); ax.set_ylabel("USD")
     st.pyplot(fig)
-else: st.info("Not enough data to plot price.")
+else:
+    st.info("Not enough data to plot price.")
 
+# -----------------------------
 # Volume
+# -----------------------------
 st.subheader("📊 Volume")
 if has_data(btc,['Volume']):
     figv,axv = plt.subplots(figsize=(12,3))
     axv.bar(btc.index,btc['Volume'],alpha=0.6)
     axv.set_ylabel("Volume")
     st.pyplot(figv)
-else: st.info("Not enough data for volume.")
+else:
+    st.info("Not enough data for volume.")
 
+# -----------------------------
 # RSI
+# -----------------------------
 st.subheader("📉 RSI")
 if has_data(btc,['RSI']):
     fig_rsi,ax_rsi = plt.subplots(figsize=(12,3))
@@ -214,18 +229,24 @@ if has_data(btc,['RSI']):
     ax_rsi.axhline(70,linestyle='--'); ax_rsi.axhline(30,linestyle='--')
     ax_rsi.set_ylim(0,100); ax_rsi.set_ylabel("RSI")
     st.pyplot(fig_rsi)
-else: st.info("Not enough data for RSI.")
+else:
+    st.info("Not enough data for RSI.")
 
+# -----------------------------
 # OBV
+# -----------------------------
 st.subheader("💰 OBV")
 if has_data(btc,['OBV']):
     fig_obv,ax_obv = plt.subplots(figsize=(12,3))
     ax_obv.plot(btc.index,btc['OBV'])
     ax_obv.set_ylabel("OBV")
     st.pyplot(fig_obv)
-else: st.info("Not enough data for OBV.")
+else:
+    st.info("Not enough data for OBV.")
 
+# -----------------------------
 # MACD
+# -----------------------------
 st.subheader("📊 MACD")
 if has_data(btc,['MACD','MACD_Signal','MACD_Hist']):
     fig_macd,ax_macd = plt.subplots(figsize=(12,3))
@@ -234,4 +255,6 @@ if has_data(btc,['MACD','MACD_Signal','MACD_Hist']):
     ax_macd.bar(btc.index,btc['MACD_Hist'],alpha=0.3,color='grey',label='Histogram')
     ax_macd.legend()
     st.pyplot(fig_macd)
-else: st.info("Not enough data for MACD.")
+else:
+    st.info("Not enough data for MACD.")
+
