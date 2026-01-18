@@ -40,6 +40,36 @@ period = st.sidebar.selectbox(
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
 
 # -----------------------------
+# Chart Overlay Controls (ONLY affects main chart)
+# -----------------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("📌 Chart Overlays")
+
+OVERLAY_OPTIONS = [
+    "SMA Short", "SMA Medium", "SMA Long",
+    "VWAP",
+    "Bollinger Bands",
+    "Support/Resistance",
+]
+
+# initialize once
+if "overlay_selected" not in st.session_state:
+    st.session_state.overlay_selected = ["SMA Short", "SMA Medium", "VWAP", "Bollinger Bands"]
+
+b1, b2 = st.sidebar.columns(2)
+if b1.button("Select all"):
+    st.session_state.overlay_selected = OVERLAY_OPTIONS
+if b2.button("Clear all"):
+    st.session_state.overlay_selected = []
+
+overlay_selected = st.sidebar.multiselect(
+    "Show overlays on chart",
+    options=OVERLAY_OPTIONS,
+    default=st.session_state.overlay_selected,
+    key="overlay_selected",
+)
+
+# -----------------------------
 # Fear & Greed (Sidebar Gauge)
 # -----------------------------
 st.sidebar.markdown("---")
@@ -116,7 +146,7 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
 
     n = len(btc)
 
-    # Adaptive windows that ALWAYS work and never misalign
+    # Adaptive windows
     sma_short_w = max(3, min(5, n))
     sma_med_w   = max(5, min(20, n))
     sma_long_w  = max(10, min(50, n))
@@ -128,12 +158,11 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
     # Bollinger Bands
     bb_w = max(5, min(20, n))
     bb_mid = close.rolling(bb_w, min_periods=1).mean()
-    # std needs at least 2 points to not be NaN
     bb_std = close.rolling(bb_w, min_periods=2).std()
     btc["BB_upper"] = bb_mid + 2 * bb_std
     btc["BB_lower"] = bb_mid - 2 * bb_std
 
-    # RSI (Wilder-style with rolling mean approximation)
+    # RSI
     rsi_w = max(5, min(14, n - 1))
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -143,7 +172,7 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     btc["RSI"] = 100 - (100 / (1 + rs))
 
-    # VWAP (intraday + daily ok)
+    # VWAP
     typical = (high + low + close) / 3.0
     denom = vol.replace(0, np.nan).cumsum()
     btc["VWAP"] = (typical * vol).cumsum() / denom
@@ -152,7 +181,7 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
     direction = np.sign(close.diff()).fillna(0)
     btc["OBV"] = (direction * vol).fillna(0).cumsum()
 
-    # MACD (short spans for intraday, classic for longer)
+    # MACD
     if period in ["1d", "7d"]:
         fast, slow, sig = 6, 13, 4
     else:
@@ -165,7 +194,6 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
     btc["MACD_Hist"] = btc["MACD"] - btc["MACD_Signal"]
 
 else:
-    # Create empty columns so code never crashes
     for c in ["SMA_short", "SMA_medium", "SMA_long", "BB_upper", "BB_lower", "RSI",
               "VWAP", "OBV", "MACD", "MACD_Signal", "MACD_Hist"]:
         btc[c] = np.nan
@@ -193,7 +221,7 @@ def detect_levels(series, window=20, tolerance=0.015):
                 clustered.append(lvl)
     return clustered
 
-levels = detect_levels(btc["Close"]) if has_data(btc, ["Close"]) else []
+levels = detect_levels(btc["Close"]) if (has_data(btc, ["Close"]) and "Support/Resistance" in overlay_selected) else []
 
 # -----------------------------
 # Header + Metrics
@@ -207,7 +235,6 @@ if has_data(btc, ["Close"]) and len(btc) >= 2:
     price = float(btc["Close"].iloc[-1])
     prev = float(btc["Close"].iloc[-2])
     change = (price - prev) / prev * 100 if prev != 0 else 0.0
-
     col1.metric("BTC Price", f"${price:,.0f}", f"{change:.2f}%")
 
     s1 = safe_last(btc["SMA_short"])
@@ -220,7 +247,7 @@ else:
     col3.metric("SMA Medium", "Loading...")
 
 # -----------------------------
-# Price + Overlays
+# Price + Overlays (controlled by sidebar)
 # -----------------------------
 st.subheader("📈 Price + Indicators")
 
@@ -228,19 +255,24 @@ if has_data(btc, ["Close"]):
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc["Close"], label="Price")
 
-    # These WILL now render (index-safe)
-    ax.plot(btc.index, btc["SMA_short"], label="SMA Short")
-    ax.plot(btc.index, btc["SMA_medium"], label="SMA Medium")
-    ax.plot(btc.index, btc["SMA_long"], label="SMA Long")
+    # Only plot what is selected
+    if "SMA Short" in overlay_selected:
+        ax.plot(btc.index, btc["SMA_short"], label="SMA Short")
+    if "SMA Medium" in overlay_selected:
+        ax.plot(btc.index, btc["SMA_medium"], label="SMA Medium")
+    if "SMA Long" in overlay_selected:
+        ax.plot(btc.index, btc["SMA_long"], label="SMA Long")
 
-    ax.plot(btc.index, btc["VWAP"], label="VWAP", linestyle="--")
+    if "VWAP" in overlay_selected:
+        ax.plot(btc.index, btc["VWAP"], label="VWAP", linestyle="--")
 
-    # BB may be NaN for very first point(s) because std needs 2 samples
-    ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
-    ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
+    if "Bollinger Bands" in overlay_selected:
+        ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
+        ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
 
-    for lvl in levels[-8:]:
-        ax.axhline(lvl, linestyle="--", alpha=0.35)
+    if "Support/Resistance" in overlay_selected:
+        for lvl in levels[-8:]:
+            ax.axhline(lvl, linestyle="--", alpha=0.35)
 
     ax.set_ylabel("USD")
     ax.legend()
@@ -302,7 +334,7 @@ else:
     st.info("Not enough data for MACD.")
 
 # -----------------------------
-# AI Forecasts (kept as before)
+# AI Forecasts
 # -----------------------------
 st.subheader("🤖 AI Forecasts")
 if has_data(btc, ["Close"]) and len(btc) > 100:
@@ -330,5 +362,6 @@ if has_data(btc, ["Close"]) and len(btc) > 100:
     st.caption("⚠️ Forecasts are experimental, not financial advice.")
 else:
     st.info("Not enough data for AI predictions yet.")
+
 
 
