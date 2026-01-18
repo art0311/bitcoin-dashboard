@@ -121,7 +121,9 @@ if len(close) >= 26:
     btc['MACD_Signal'] = btc['MACD'].ewm(span=9, adjust=False).mean()
     btc['MACD_Hist'] = btc['MACD'] - btc['MACD_Signal']
 else:
-    btc['MACD'] = btc['MACD_Signal'] = btc['MACD_Hist'] = np.nan
+    btc['MACD'] = np.nan
+    btc['MACD_Signal'] = np.nan
+    btc['MACD_Hist'] = np.nan
 
 
 # -----------------------------
@@ -133,7 +135,8 @@ if len(close) >= 20:
     btc['BB_upper'] = sma20 + 2 * std20
     btc['BB_lower'] = sma20 - 2 * std20
 else:
-    btc['BB_upper'] = btc['BB_lower'] = np.nan
+    btc['BB_upper'] = np.nan
+    btc['BB_lower'] = np.nan
 
 
     # SMA
