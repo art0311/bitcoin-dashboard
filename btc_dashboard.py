@@ -15,9 +15,6 @@ st.set_page_config(page_title="Bitcoin Live Dashboard", layout="wide")
 # Helper function to check data
 # -----------------------------
 def has_data(df, cols):
-    """
-    Returns True if DataFrame is not empty and contains all required columns.
-    """
     return df is not None and not df.empty and all(col in df.columns for col in cols)
 
 # -----------------------------
@@ -35,7 +32,7 @@ period = st.sidebar.selectbox(
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
 
 # -----------------------------
-# Crypto Fear & Greed Index (Sidebar Gauge)
+# Crypto Fear & Greed Gauge
 # -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧠 Market Sentiment")
@@ -76,12 +73,11 @@ else:
     st.sidebar.info("Could not fetch sentiment data.")
 
 # -----------------------------
-# Data Loader (fully crash-proof)
+# Data Loader
 # -----------------------------
 @st.cache_data(ttl=120)
 def load_data(symbol, period):
     try:
-        # Short ranges: use intraday 5-min
         if period in ["1d", "7d"]:
             df = yf.download(symbol, period=period, interval="5m", progress=False)
         else:
@@ -103,7 +99,7 @@ def load_data(symbol, period):
 btc = load_data(symbol, period)
 
 # -----------------------------
-# Indicators (SMA, RSI, VWAP, OBV)
+# Indicators (SMA, RSI, VWAP, OBV, MACD, Bollinger Bands)
 # -----------------------------
 if has_data(btc, ['Close', 'High', 'Low', 'Volume']):
     close = btc['Close'].to_numpy(dtype=float)
@@ -111,39 +107,9 @@ if has_data(btc, ['Close', 'High', 'Low', 'Volume']):
     low = btc['Low'].to_numpy(dtype=float)
     volume = btc['Volume'].to_numpy(dtype=float)
 
-# -----------------------------
-# MACD
-# -----------------------------
-if len(close) >= 26:
-    exp12 = pd.Series(close).ewm(span=12, adjust=False).mean()
-    exp26 = pd.Series(close).ewm(span=26, adjust=False).mean()
-    btc['MACD'] = exp12 - exp26
-    btc['MACD_Signal'] = btc['MACD'].ewm(span=9, adjust=False).mean()
-    btc['MACD_Hist'] = btc['MACD'] - btc['MACD_Signal']
-else:
-    btc['MACD'] = np.nan
-    btc['MACD_Signal'] = np.nan
-    btc['MACD_Hist'] = np.nan
-
-
-# -----------------------------
-# Bollinger Bands
-# -----------------------------
-if len(close) >= 20:
-    sma20 = pd.Series(close).rolling(20).mean()
-    std20 = pd.Series(close).rolling(20).std()
-    btc['BB_upper'] = sma20 + 2 * std20
-    btc['BB_lower'] = sma20 - 2 * std20
-else:
-    btc['BB_upper'] = np.nan
-    btc['BB_lower'] = np.nan
-
-
     # SMA
-    if len(close) >= 50:
-        btc['SMA_50'] = pd.Series(close).rolling(50).mean().to_numpy()
-    if len(close) >= 200:
-        btc['SMA_200'] = pd.Series(close).rolling(200).mean().to_numpy()
+    btc['SMA_50'] = pd.Series(close).rolling(50).mean() if len(close) >= 50 else np.nan
+    btc['SMA_200'] = pd.Series(close).rolling(200).mean() if len(close) >= 200 else np.nan
 
     # RSI
     if len(close) >= 15:
@@ -151,7 +117,9 @@ else:
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
         rs = gain.rolling(14).mean() / loss.rolling(14).mean()
-        btc['RSI'] = (100 - (100 / (1 + rs))).to_numpy()
+        btc['RSI'] = 100 - (100 / (1 + rs))
+    else:
+        btc['RSI'] = np.nan
 
     # VWAP
     typical_price = (high + low + close) / 3
@@ -167,199 +135,60 @@ else:
         else:
             obv[i] = obv[i-1]
     btc['OBV'] = obv
+
+    # MACD
+    if len(close) >= 26:
+        exp12 = pd.Series(close).ewm(span=12, adjust=False).mean()
+        exp26 = pd.Series(close).ewm(span=26, adjust=False).mean()
+        btc['MACD'] = exp12 - exp26
+        btc['MACD_Signal'] = btc['MACD'].ewm(span=9, adjust=False).mean()
+        btc['MACD_Hist'] = btc['MACD'] - btc['MACD_Signal']
+    else:
+        btc['MACD'] = btc['MACD_Signal'] = btc['MACD_Hist'] = np.nan
+
+    # Bollinger Bands
+    if len(close) >= 20:
+        sma20 = pd.Series(close).rolling(20).mean()
+        std20 = pd.Series(close).rolling(20).std()
+        btc['BB_upper'] = sma20 + 2 * std20
+        btc['BB_lower'] = sma20 - 2 * std20
+    else:
+        btc['BB_upper'] = btc['BB_lower'] = np.nan
 else:
-    # fill columns so plotting doesn't break
-    for col in ['SMA_50','SMA_200','RSI','VWAP','OBV']:
+    # Ensure all columns exist to avoid errors
+    for col in ['SMA_50','SMA_200','RSI','VWAP','OBV','MACD','MACD_Signal','MACD_Hist','BB_upper','BB_lower']:
         btc[col] = np.nan
 
 # -----------------------------
-# Support & Resistance Detection
+# Support & Resistance
 # -----------------------------
 def detect_levels(series, window=20, tolerance=0.015):
     prices = series.to_numpy(dtype=float)
     levels = []
-
     for i in range(window, len(prices) - window):
         low_range = prices[i-window:i+window]
         current = prices[i]
-
         if current == low_range.min():
             levels.append(current)
         elif current == low_range.max():
             levels.append(current)
-
     levels = sorted(levels)
     clustered = []
     for level in levels:
-        if not clustered:
+        if not clustered or abs(level - clustered[-1]) / clustered[-1] > tolerance:
             clustered.append(level)
-        elif abs(level - clustered[-1]) / clustered[-1] > tolerance:
-            clustered.append(level)
-
     return clustered
 
 levels = detect_levels(btc['Close']) if has_data(btc, ['Close']) else []
 
 # -----------------------------
-# Header
+# Dashboard Layout
 # -----------------------------
 st.title("📊 Bitcoin Live Market Dashboard")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
-# -----------------------------
 # Metrics
-# -----------------------------
-col1, col2, col3 = st.columns(3)
 
-if not has_data(btc, ['Close']):
-    col1.metric("BTC Price (USD)", "Loading...", "")
-    col2.metric("50D SMA", "Loading...")
-    col3.metric("200D SMA", "Loading...")
-else:
-    price = float(btc['Close'].iloc[-1])
-    prev = float(btc['Close'].iloc[-2])
-    change = ((price - prev) / prev) * 100
-
-    col1.metric("BTC Price (USD)", f"${price:,.0f}", f"{change:.2f}%")
-    col2.metric("50D SMA", f"${btc['SMA_50'].iloc[-1]:,.0f}" if 'SMA_50' in btc else "N/A")
-    col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}" if 'SMA_200' in btc else "N/A")
-
-# -----------------------------
-# Price Chart + VWAP + Support/Resistance
-# -----------------------------
-if has_data(btc, ['Close', 'VWAP']):
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(btc.index, btc['Close'], label='Price')
-    if 'SMA_50' in btc:
-        ax.plot(btc.index, btc['SMA_50'], label='SMA 50')
-    if 'SMA_200' in btc:
-        ax.plot(btc.index, btc['SMA_200'], label='SMA 200')
-    ax.plot(btc.index, btc['VWAP'], label='VWAP', linestyle='--')
-
-    # Bollinger Bands
-    if 'BB_upper' in btc and 'BB_lower' in btc:
-        ax.plot(btc.index, btc['BB_upper'], label='BB Upper', linestyle='--', alpha=0.5)
-        ax.plot(btc.index, btc['BB_lower'], label='BB Lower', linestyle='--', alpha=0.5)
-
-    for level in levels[-8:]:
-        ax.axhline(level, linestyle='--', alpha=0.4)
-
-    ax.legend()
-    ax.set_ylabel("USD")
-    st.pyplot(fig)
-
-
-# -----------------------------
-# Volume Panel
-# -----------------------------
-st.subheader("📊 Volume")
-
-if has_data(btc, ['Volume']):
-    figv, axv = plt.subplots(figsize=(12, 3))
-    axv.bar(btc.index, btc['Volume'], alpha=0.6)
-    axv.set_ylabel("Volume")
-    st.pyplot(figv)
-else:
-    st.info("Not enough data for volume.")
-
-# -----------------------------
-# RSI Panel
-# -----------------------------
-st.subheader("📉 RSI Indicator")
-
-if has_data(btc, ['RSI']):
-    fig2, ax2 = plt.subplots(figsize=(12, 3))
-    ax2.plot(btc.index, btc['RSI'])
-    ax2.axhline(70, linestyle='--')
-    ax2.axhline(30, linestyle='--')
-    ax2.set_ylim(0, 100)
-    ax2.set_ylabel("RSI")
-    st.pyplot(fig2)
-else:
-    st.info("Not enough data for RSI.")
-
-# -----------------------------
-# OBV Panel
-# -----------------------------
-st.subheader("💰 On-Balance Volume (OBV)")
-
-if has_data(btc, ['OBV']):
-    fig_obv, ax_obv = plt.subplots(figsize=(12, 3))
-    ax_obv.plot(btc.index, btc['OBV'])
-    ax_obv.set_ylabel("OBV")
-    st.pyplot(fig_obv)
-else:
-    st.info("Not enough data for OBV.")
-
-# -----------------------------
-# MACD Panel
-# -----------------------------
-st.subheader("📊 MACD Indicator")
-
-if has_data(btc, ['MACD', 'MACD_Signal', 'MACD_Hist']):
-    fig_macd, ax_macd = plt.subplots(figsize=(12, 3))
-    ax_macd.plot(btc.index, btc['MACD'], label='MACD')
-    ax_macd.plot(btc.index, btc['MACD_Signal'], label='Signal')
-    ax_macd.bar(btc.index, btc['MACD_Hist'], label='Histogram', alpha=0.3, color='grey')
-    ax_macd.legend()
-    st.pyplot(fig_macd)
-else:
-    st.info("Not enough data for MACD.")
-
-
-# -----------------------------
-# AI Prediction Models
-# -----------------------------
-st.subheader("🤖 AI Price Predictions")
-
-if len(btc) > 100:
-    df = btc.copy()
-    df['t'] = np.arange(len(df))
-
-    X = df[['t']]
-    y = df['Close']
-
-    lr = LinearRegression()
-    lr.fit(X, y)
-
-    rf = RandomForestRegressor(n_estimators=200, random_state=42)
-    rf.fit(X, y)
-
-    future_t = np.arange(len(df), len(df) + predict_days).reshape(-1, 1)
-
-    lr_pred = lr.predict(future_t)
-    rf_pred = rf.predict(future_t)
-
-    future_dates = pd.date_range(df.index[-1], periods=predict_days+1, freq='D')[1:]
-
-    fig4, ax4 = plt.subplots(figsize=(12, 4))
-    ax4.plot(df.index, df['Close'], label='Historical')
-    ax4.plot(future_dates, lr_pred, label='Linear Regression Forecast')
-    ax4.plot(future_dates, rf_pred, label='Random Forest Forecast')
-    ax4.legend()
-    st.pyplot(fig4)
-    st.caption("⚠️ AI forecasts are experimental and not financial advice.")
-else:
-    st.info("Not enough data for AI predictions yet.")
-
-# -----------------------------
-# Short-Term Trend Projection
-# -----------------------------
-st.subheader("🔮 Short-Term Trend Projection")
-
-if has_data(btc, ['Close']) and len(btc) > 30:
-    y = btc['Close'].values
-    X = np.arange(len(y))
-    coef = np.polyfit(X[-30:], y[-30:], 1)
-    trend = coef[0] * X + coef[1]
-
-    fig3, ax3 = plt.subplots(figsize=(12, 4))
-    ax3.plot(btc.index, btc['Close'], label='Actual')
-    ax3.plot(btc.index, trend, label='Trend')
-    ax3.legend()
-    st.pyplot(fig3)
-else:
-    st.info("Not enough data for projection.")
 
 
 
