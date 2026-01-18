@@ -67,12 +67,14 @@ else:
     st.sidebar.info("Could not fetch sentiment data.")
 
 # -----------------------------
-# Data Loader
+# Data Loader (multi-index safe)
 # -----------------------------
 @st.cache_data(ttl=120)
 def load_data(symbol, period):
     try:
         df = yf.download(symbol, period=period, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         return df
@@ -82,43 +84,48 @@ def load_data(symbol, period):
 btc = load_data(symbol, period)
 
 # -----------------------------
-# Indicators (Crash-proof)
+# Indicators (fully crash-proof)
 # -----------------------------
 if not btc.empty and len(btc) > 1:
+    close = btc['Close'].to_numpy(dtype=float)
+    high = btc['High'].to_numpy(dtype=float)
+    low = btc['Low'].to_numpy(dtype=float)
+    volume = btc['Volume'].to_numpy(dtype=float)
+
     # SMA
-    if len(btc) >= 50:
-        btc['SMA_50'] = btc['Close'].rolling(50).mean()
-    if len(btc) >= 200:
-        btc['SMA_200'] = btc['Close'].rolling(200).mean()
+    if len(close) >= 50:
+        btc['SMA_50'] = pd.Series(close).rolling(50).mean().to_numpy()
+    if len(close) >= 200:
+        btc['SMA_200'] = pd.Series(close).rolling(200).mean().to_numpy()
 
     # RSI
-    if len(btc) >= 15:
-        delta = btc['Close'].diff()
+    if len(close) >= 15:
+        delta = pd.Series(close).diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
         rs = gain.rolling(14).mean() / loss.rolling(14).mean()
-        btc['RSI'] = 100 - (100 / (1 + rs))
+        btc['RSI'] = (100 - (100 / (1 + rs))).to_numpy()
 
     # VWAP
-    typical_price = (btc['High'] + btc['Low'] + btc['Close']) / 3
-    btc['VWAP'] = (typical_price * btc['Volume']).cumsum() / btc['Volume'].cumsum()
+    typical_price = (high + low + close) / 3
+    btc['VWAP'] = (typical_price * volume).cumsum() / volume.cumsum()
 
     # OBV
-    obv = [0]
-    for i in range(1, len(btc)):
-        if btc['Close'].iloc[i] > btc['Close'].iloc[i-1]:
-            obv.append(obv[-1] + btc['Volume'].iloc[i])
-        elif btc['Close'].iloc[i] < btc['Close'].iloc[i-1]:
-            obv.append(obv[-1] - btc['Volume'].iloc[i])
+    obv = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if close[i] > close[i-1]:
+            obv[i] = obv[i-1] + volume[i]
+        elif close[i] < close[i-1]:
+            obv[i] = obv[i-1] - volume[i]
         else:
-            obv.append(obv[-1])
+            obv[i] = obv[i-1]
     btc['OBV'] = obv
 
 # -----------------------------
 # Support & Resistance Detection
 # -----------------------------
 def detect_levels(series, window=20, tolerance=0.015):
-    prices = series.values
+    prices = series.to_numpy(dtype=float)
     levels = []
 
     for i in range(window, len(prices) - window):
@@ -221,22 +228,17 @@ else:
     st.info("Not enough data for RSI.")
 
 # -----------------------------
-# OBV (Crash-proof)
+# OBV Panel
 # -----------------------------
-if not btc.empty and 'Close' in btc and 'Volume' in btc:
-    close = btc['Close'].values.flatten()
-    volume = btc['Volume'].values.flatten()
+st.subheader("💰 On-Balance Volume (OBV)")
 
-    obv = [0]
-    for i in range(1, len(close)):
-        if close[i] > close[i-1]:
-            obv.append(obv[-1] + volume[i])
-        elif close[i] < close[i-1]:
-            obv.append(obv[-1] - volume[i])
-        else:
-            obv.append(obv[-1])
-    btc['OBV'] = obv
-
+if not btc.empty and 'OBV' in btc:
+    fig_obv, ax_obv = plt.subplots(figsize=(12, 3))
+    ax_obv.plot(btc.index, btc['OBV'])
+    ax_obv.set_ylabel("OBV")
+    st.pyplot(fig_obv)
+else:
+    st.info("Not enough data for OBV.")
 
 # -----------------------------
 # AI Prediction Models
@@ -291,6 +293,7 @@ if len(btc) > 30:
     st.pyplot(fig3)
 else:
     st.info("Not enough data for projection.")
+
 
 
 
