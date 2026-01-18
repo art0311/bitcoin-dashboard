@@ -65,6 +65,7 @@ else:
 @st.cache_data(ttl=120)
 def load_data(symbol, period):
     try:
+        # Short-term intervals
         if period == "1d":
             df = yf.download(symbol, period=period, interval="5m", progress=False)
         elif period == "7d":
@@ -103,15 +104,15 @@ if has_data(btc, ['Close','High','Low','Volume']) and len(btc) > 1:
     btc['SMA_medium'] = pd.Series(close).rolling(sma_medium).mean()
     btc['SMA_long'] = pd.Series(close).rolling(sma_long).mean()
 
-    # Adaptive Bollinger Bands
-    bb_window = min(20,len(close))
+    # Adaptive Bollinger Bands (min 3 for short ranges)
+    bb_window = max(3, min(20,len(close)))
     sma20 = pd.Series(close).rolling(bb_window).mean()
     std20 = pd.Series(close).rolling(bb_window).std()
     btc['BB_upper'] = sma20 + 2*std20
     btc['BB_lower'] = sma20 - 2*std20
 
     # Adaptive RSI
-    rsi_window = min(14,len(close)-1)
+    rsi_window = max(3, min(14,len(close)-1))
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -131,10 +132,13 @@ if has_data(btc, ['Close','High','Low','Volume']) and len(btc) > 1:
     btc['OBV']=obv
 
     # Adaptive MACD
-    span_fast = min(12,len(close))
-    span_slow = min(26,len(close))
-    btc['MACD'] = pd.Series(close).ewm(span=span_fast,adjust=False).mean() - pd.Series(close).ewm(span=span_slow,adjust=False).mean()
-    btc['MACD_Signal'] = btc['MACD'].ewm(span=min(9,len(close)),adjust=False).mean()
+    if period in ['1d','7d']:  # short intraday: smaller spans
+        fast_span, slow_span, signal_span = 3, 6, 2
+    else:
+        fast_span, slow_span, signal_span = 12, 26, 9
+
+    btc['MACD'] = pd.Series(close).ewm(span=fast_span,adjust=False).mean() - pd.Series(close).ewm(span=slow_span,adjust=False).mean()
+    btc['MACD_Signal'] = btc['MACD'].ewm(span=signal_span,adjust=False).mean()
     btc['MACD_Hist'] = btc['MACD'] - btc['MACD_Signal']
 
 else:
@@ -231,5 +235,3 @@ if has_data(btc,['MACD','MACD_Signal','MACD_Hist']):
     ax_macd.legend()
     st.pyplot(fig_macd)
 else: st.info("Not enough data for MACD.")
-
-
