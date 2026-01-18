@@ -111,6 +111,31 @@ if has_data(btc, ['Close', 'High', 'Low', 'Volume']):
     low = btc['Low'].to_numpy(dtype=float)
     volume = btc['Volume'].to_numpy(dtype=float)
 
+# -----------------------------
+# MACD
+# -----------------------------
+if len(close) >= 26:
+    exp12 = pd.Series(close).ewm(span=12, adjust=False).mean()
+    exp26 = pd.Series(close).ewm(span=26, adjust=False).mean()
+    btc['MACD'] = exp12 - exp26
+    btc['MACD_Signal'] = btc['MACD'].ewm(span=9, adjust=False).mean()
+    btc['MACD_Hist'] = btc['MACD'] - btc['MACD_Signal']
+else:
+    btc['MACD'] = btc['MACD_Signal'] = btc['MACD_Hist'] = np.nan
+
+
+# -----------------------------
+# Bollinger Bands
+# -----------------------------
+if len(close) >= 20:
+    sma20 = pd.Series(close).rolling(20).mean()
+    std20 = pd.Series(close).rolling(20).std()
+    btc['BB_upper'] = sma20 + 2 * std20
+    btc['BB_lower'] = sma20 - 2 * std20
+else:
+    btc['BB_upper'] = btc['BB_lower'] = np.nan
+
+
     # SMA
     if len(close) >= 50:
         btc['SMA_50'] = pd.Series(close).rolling(50).mean().to_numpy()
@@ -199,8 +224,6 @@ else:
 # -----------------------------
 # Price Chart + VWAP + Support/Resistance
 # -----------------------------
-st.subheader("📈 Price + VWAP + Support/Resistance")
-
 if has_data(btc, ['Close', 'VWAP']):
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc['Close'], label='Price')
@@ -210,14 +233,18 @@ if has_data(btc, ['Close', 'VWAP']):
         ax.plot(btc.index, btc['SMA_200'], label='SMA 200')
     ax.plot(btc.index, btc['VWAP'], label='VWAP', linestyle='--')
 
+    # Bollinger Bands
+    if 'BB_upper' in btc and 'BB_lower' in btc:
+        ax.plot(btc.index, btc['BB_upper'], label='BB Upper', linestyle='--', alpha=0.5)
+        ax.plot(btc.index, btc['BB_lower'], label='BB Lower', linestyle='--', alpha=0.5)
+
     for level in levels[-8:]:
         ax.axhline(level, linestyle='--', alpha=0.4)
 
     ax.legend()
     ax.set_ylabel("USD")
     st.pyplot(fig)
-else:
-    st.info("Not enough data for price chart.")
+
 
 # -----------------------------
 # Volume Panel
@@ -260,6 +287,22 @@ if has_data(btc, ['OBV']):
     st.pyplot(fig_obv)
 else:
     st.info("Not enough data for OBV.")
+
+# -----------------------------
+# MACD Panel
+# -----------------------------
+st.subheader("📊 MACD Indicator")
+
+if has_data(btc, ['MACD', 'MACD_Signal', 'MACD_Hist']):
+    fig_macd, ax_macd = plt.subplots(figsize=(12, 3))
+    ax_macd.plot(btc.index, btc['MACD'], label='MACD')
+    ax_macd.plot(btc.index, btc['MACD_Signal'], label='Signal')
+    ax_macd.bar(btc.index, btc['MACD_Hist'], label='Histogram', alpha=0.3, color='grey')
+    ax_macd.legend()
+    st.pyplot(fig_macd)
+else:
+    st.info("Not enough data for MACD.")
+
 
 # -----------------------------
 # AI Prediction Models
