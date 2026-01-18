@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
+import requests
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Bitcoin Live Dashboard", layout="wide")
 
@@ -17,25 +19,23 @@ symbol = st.sidebar.selectbox("Asset", ["BTC-USD"], index=0)
 
 period = st.sidebar.selectbox(
     "Time Range",
-    ["1d", "7d", "1mo", "1y", "2y", "5y", "max"],  # Added 1d, 7d, 1mo
+    ["1d", "7d", "1mo", "1y", "2y", "5y", "max"],
     index=3
 )
 
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
 
 # -----------------------------
-# Crypto Fear & Greed Index (Gauge)
+# Crypto Fear & Greed Index (Sidebar Gauge)
 # -----------------------------
-import requests
-import plotly.graph_objects as go
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧠 Market Sentiment")
 
+@st.cache_data(ttl=300)
 def fetch_fng():
     try:
         url = "https://api.alternative.me/fng/"
-        r = requests.get(url)
+        r = requests.get(url, timeout=5)
         data = r.json()['data'][0]
         value = int(data['value'])
         label = data['value_classification']
@@ -46,23 +46,23 @@ def fetch_fng():
 sentiment_score, sentiment_label = fetch_fng()
 
 if sentiment_score is not None:
-    fig = go.Figure(go.Indicator(
+    fig_gauge = go.Figure(go.Indicator(
         mode="gauge+number",
         value=sentiment_score,
         gauge={
             'axis': {'range': [0, 100]},
             'bar': {'color': "darkblue"},
             'steps': [
-                {'range': [0, 24], 'color': 'red'},         # Extreme Fear
-                {'range': [25, 49], 'color': 'orange'},     # Fear
-                {'range': [50, 50], 'color': 'yellow'},     # Neutral
-                {'range': [51, 74], 'color': 'lightgreen'}, # Greed
-                {'range': [75, 100], 'color': 'green'}      # Extreme Greed
+                {'range': [0, 24], 'color': 'red'},
+                {'range': [25, 49], 'color': 'orange'},
+                {'range': [50, 50], 'color': 'yellow'},
+                {'range': [51, 74], 'color': 'lightgreen'},
+                {'range': [75, 100], 'color': 'green'}
             ],
         },
         title={'text': sentiment_label}
     ))
-    st.sidebar.plotly_chart(fig, use_container_width=True)
+    st.sidebar.plotly_chart(fig_gauge, use_container_width=True)
 else:
     st.sidebar.info("Could not fetch sentiment data.")
 
@@ -73,7 +73,7 @@ else:
 def load_data(symbol, period):
     try:
         df = yf.download(symbol, period=period, progress=False)
-        df = df[['Close']]
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df.dropna(inplace=True)
         return df
     except Exception:
@@ -85,17 +85,34 @@ btc = load_data(symbol, period)
 # Indicators (Crash-proof)
 # -----------------------------
 if not btc.empty and len(btc) > 1:
+    # SMA
     if len(btc) >= 50:
         btc['SMA_50'] = btc['Close'].rolling(50).mean()
     if len(btc) >= 200:
         btc['SMA_200'] = btc['Close'].rolling(200).mean()
 
+    # RSI
     if len(btc) >= 15:
         delta = btc['Close'].diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
         rs = gain.rolling(14).mean() / loss.rolling(14).mean()
         btc['RSI'] = 100 - (100 / (1 + rs))
+
+    # VWAP
+    typical_price = (btc['High'] + btc['Low'] + btc['Close']) / 3
+    btc['VWAP'] = (typical_price * btc['Volume']).cumsum() / btc['Volume'].cumsum()
+
+    # OBV
+    obv = [0]
+    for i in range(1, len(btc)):
+        if btc['Close'].iloc[i] > btc['Close'].iloc[i-1]:
+            obv.append(obv[-1] + btc['Volume'].iloc[i])
+        elif btc['Close'].iloc[i] < btc['Close'].iloc[i-1]:
+            obv.append(obv[-1] - btc['Volume'].iloc[i])
+        else:
+            obv.append(obv[-1])
+    btc['OBV'] = obv
 
 # -----------------------------
 # Support & Resistance Detection
@@ -150,9 +167,9 @@ else:
     col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}" if 'SMA_200' in btc else "N/A")
 
 # -----------------------------
-# Price Chart with Support & Resistance
+# Price Chart with VWAP + Support & Resistance
 # -----------------------------
-st.subheader("📈 Price Chart + Support & Resistance")
+st.subheader("📈 Price + VWAP + Support/Resistance")
 
 if not btc.empty:
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -162,6 +179,8 @@ if not btc.empty:
         ax.plot(btc.index, btc['SMA_50'], label='SMA 50')
     if 'SMA_200' in btc:
         ax.plot(btc.index, btc['SMA_200'], label='SMA 200')
+
+    ax.plot(btc.index, btc['VWAP'], label='VWAP', linestyle='--')
 
     for level in levels[-8:]:
         ax.axhline(level, linestyle='--', alpha=0.4)
@@ -173,7 +192,20 @@ else:
     st.info("Loading price data...")
 
 # -----------------------------
-# RSI Chart
+# Volume Panel
+# -----------------------------
+st.subheader("📊 Volume")
+
+if not btc.empty:
+    figv, axv = plt.subplots(figsize=(12, 3))
+    axv.bar(btc.index, btc['Volume'], alpha=0.6)
+    axv.set_ylabel("Volume")
+    st.pyplot(figv)
+else:
+    st.info("Not enough data for volume.")
+
+# -----------------------------
+# RSI Panel
 # -----------------------------
 st.subheader("📉 RSI Indicator")
 
@@ -187,6 +219,19 @@ if not btc.empty and 'RSI' in btc:
     st.pyplot(fig2)
 else:
     st.info("Not enough data for RSI.")
+
+# -----------------------------
+# OBV Panel
+# -----------------------------
+st.subheader("💰 On-Balance Volume (OBV)")
+
+if not btc.empty and 'OBV' in btc:
+    fig_obv, ax_obv = plt.subplots(figsize=(12, 3))
+    ax_obv.plot(btc.index, btc['OBV'])
+    ax_obv.set_ylabel("OBV")
+    st.pyplot(fig_obv)
+else:
+    st.info("Not enough data for OBV.")
 
 # -----------------------------
 # AI Prediction Models
@@ -241,6 +286,7 @@ if len(btc) > 30:
     st.pyplot(fig3)
 else:
     st.info("Not enough data for projection.")
+
 
 
 
