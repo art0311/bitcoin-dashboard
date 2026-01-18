@@ -12,6 +12,15 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Bitcoin Live Dashboard", layout="wide")
 
 # -----------------------------
+# Helper function to check data
+# -----------------------------
+def has_data(df, cols):
+    """
+    Returns True if DataFrame is not empty and contains all required columns.
+    """
+    return df is not None and not df.empty and all(col in df.columns for col in cols)
+
+# -----------------------------
 # Sidebar
 # -----------------------------
 st.sidebar.title("⚙️ Settings")
@@ -67,37 +76,35 @@ else:
     st.sidebar.info("Could not fetch sentiment data.")
 
 # -----------------------------
-# Data Loader (multi-index safe)
+# Data Loader (fully crash-proof)
 # -----------------------------
 @st.cache_data(ttl=120)
 def load_data(symbol, period):
     try:
+        # Short ranges: use intraday 5-min
         if period in ["1d", "7d"]:
             df = yf.download(symbol, period=period, interval="5m", progress=False)
         else:
             df = yf.download(symbol, period=period, progress=False)
-        
+
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        
+
         # Ensure OHLCV exists
         for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
             if col not in df.columns:
                 df[col] = np.nan
-        
+
         df.dropna(subset=['Close', 'High', 'Low', 'Volume'], inplace=True)
         return df
     except Exception:
         return pd.DataFrame()
 
+btc = load_data(symbol, period)
 
 # -----------------------------
-# Indicators (fully crash-proof)
+# Indicators (SMA, RSI, VWAP, OBV)
 # -----------------------------
-# Check that we have data and required columns
-def has_data(df, cols):
-    return not df.empty and all(col in df.columns for col in cols)
-
 if has_data(btc, ['Close', 'High', 'Low', 'Volume']):
     close = btc['Close'].to_numpy(dtype=float)
     high = btc['High'].to_numpy(dtype=float)
@@ -133,10 +140,9 @@ if has_data(btc, ['Close', 'High', 'Low', 'Volume']):
             obv[i] = obv[i-1]
     btc['OBV'] = obv
 else:
-    # Ensure columns exist so downstream code doesn't break
+    # fill columns so plotting doesn't break
     for col in ['SMA_50','SMA_200','RSI','VWAP','OBV']:
         btc[col] = np.nan
-
 
 # -----------------------------
 # Support & Resistance Detection
@@ -164,7 +170,7 @@ def detect_levels(series, window=20, tolerance=0.015):
 
     return clustered
 
-levels = detect_levels(btc['Close']) if not btc.empty else []
+levels = detect_levels(btc['Close']) if has_data(btc, ['Close']) else []
 
 # -----------------------------
 # Header
@@ -177,7 +183,7 @@ st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 # -----------------------------
 col1, col2, col3 = st.columns(3)
 
-if btc.empty or len(btc) < 2:
+if not has_data(btc, ['Close']):
     col1.metric("BTC Price (USD)", "Loading...", "")
     col2.metric("50D SMA", "Loading...")
     col3.metric("200D SMA", "Loading...")
@@ -191,19 +197,17 @@ else:
     col3.metric("200D SMA", f"${btc['SMA_200'].iloc[-1]:,.0f}" if 'SMA_200' in btc else "N/A")
 
 # -----------------------------
-# Price Chart with VWAP + Support & Resistance
+# Price Chart + VWAP + Support/Resistance
 # -----------------------------
 st.subheader("📈 Price + VWAP + Support/Resistance")
 
-if not btc.empty:
+if has_data(btc, ['Close', 'VWAP']):
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc['Close'], label='Price')
-
     if 'SMA_50' in btc:
         ax.plot(btc.index, btc['SMA_50'], label='SMA 50')
     if 'SMA_200' in btc:
         ax.plot(btc.index, btc['SMA_200'], label='SMA 200')
-
     ax.plot(btc.index, btc['VWAP'], label='VWAP', linestyle='--')
 
     for level in levels[-8:]:
@@ -213,14 +217,14 @@ if not btc.empty:
     ax.set_ylabel("USD")
     st.pyplot(fig)
 else:
-    st.info("Loading price data...")
+    st.info("Not enough data for price chart.")
 
 # -----------------------------
 # Volume Panel
 # -----------------------------
 st.subheader("📊 Volume")
 
-if not btc.empty:
+if has_data(btc, ['Volume']):
     figv, axv = plt.subplots(figsize=(12, 3))
     axv.bar(btc.index, btc['Volume'], alpha=0.6)
     axv.set_ylabel("Volume")
@@ -233,7 +237,7 @@ else:
 # -----------------------------
 st.subheader("📉 RSI Indicator")
 
-if not btc.empty and 'RSI' in btc:
+if has_data(btc, ['RSI']):
     fig2, ax2 = plt.subplots(figsize=(12, 3))
     ax2.plot(btc.index, btc['RSI'])
     ax2.axhline(70, linestyle='--')
@@ -249,7 +253,7 @@ else:
 # -----------------------------
 st.subheader("💰 On-Balance Volume (OBV)")
 
-if not btc.empty and 'OBV' in btc:
+if has_data(btc, ['OBV']):
     fig_obv, ax_obv = plt.subplots(figsize=(12, 3))
     ax_obv.plot(btc.index, btc['OBV'])
     ax_obv.set_ylabel("OBV")
@@ -293,11 +297,11 @@ else:
     st.info("Not enough data for AI predictions yet.")
 
 # -----------------------------
-# Trend Projection
+# Short-Term Trend Projection
 # -----------------------------
 st.subheader("🔮 Short-Term Trend Projection")
 
-if len(btc) > 30:
+if has_data(btc, ['Close']) and len(btc) > 30:
     y = btc['Close'].values
     X = np.arange(len(y))
     coef = np.polyfit(X[-30:], y[-30:], 1)
@@ -310,6 +314,7 @@ if len(btc) > 30:
     st.pyplot(fig3)
 else:
     st.info("Not enough data for projection.")
+
 
 
 
