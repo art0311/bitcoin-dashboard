@@ -72,16 +72,24 @@ else:
 @st.cache_data(ttl=120)
 def load_data(symbol, period):
     try:
-        df = yf.download(symbol, period=period, progress=False)
+        if period in ["1d", "7d"]:
+            df = yf.download(symbol, period=period, interval="5m", progress=False)
+        else:
+            df = yf.download(symbol, period=period, progress=False)
+        
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-        df.dropna(inplace=True)
+        
+        # Ensure OHLCV exists
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            if col not in df.columns:
+                df[col] = np.nan
+        
+        df.dropna(subset=['Close', 'High', 'Low', 'Volume'], inplace=True)
         return df
     except Exception:
         return pd.DataFrame()
 
-btc = load_data(symbol, period)
 
 # -----------------------------
 # Indicators (fully crash-proof)
@@ -107,8 +115,16 @@ if not btc.empty and len(btc) > 1:
         btc['RSI'] = (100 - (100 / (1 + rs))).to_numpy()
 
     # VWAP
+if not btc.empty and all(x in btc.columns for x in ['Close', 'High', 'Low', 'Volume']):
+    close = btc['Close'].to_numpy(dtype=float)
+    high = btc['High'].to_numpy(dtype=float)
+    low = btc['Low'].to_numpy(dtype=float)
+    volume = btc['Volume'].to_numpy(dtype=float)
     typical_price = (high + low + close) / 3
     btc['VWAP'] = (typical_price * volume).cumsum() / volume.cumsum()
+else:
+    btc['VWAP'] = np.nan
+
 
     # OBV
     obv = np.zeros(len(close))
