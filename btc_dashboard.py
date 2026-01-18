@@ -221,17 +221,22 @@ else:
     st.info("Not enough data for RSI.")
 
 # -----------------------------
-# OBV Panel
+# OBV (Crash-proof)
 # -----------------------------
-st.subheader("💰 On-Balance Volume (OBV)")
+if not btc.empty and 'Close' in btc and 'Volume' in btc:
+    close = btc['Close'].values.flatten()
+    volume = btc['Volume'].values.flatten()
 
-if not btc.empty and 'OBV' in btc:
-    fig_obv, ax_obv = plt.subplots(figsize=(12, 3))
-    ax_obv.plot(btc.index, btc['OBV'])
-    ax_obv.set_ylabel("OBV")
-    st.pyplot(fig_obv)
-else:
-    st.info("Not enough data for OBV.")
+    obv = [0]
+    for i in range(1, len(close)):
+        if close[i] > close[i-1]:
+            obv.append(obv[-1] + volume[i])
+        elif close[i] < close[i-1]:
+            obv.append(obv[-1] - volume[i])
+        else:
+            obv.append(obv[-1])
+    btc['OBV'] = obv
+
 
 # -----------------------------
 # AI Prediction Models
