@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import requests
 import plotly.graph_objects as go
+import re
 
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
@@ -119,6 +120,41 @@ def market_strength_score(btc: pd.DataFrame):
 
     return score, label
 
+@st.cache_data(ttl=900)  # 15 min
+def fetch_etf_total_flows_usdm():
+    """
+    Pulls Farside 'Bitcoin ETF Flow – All Data' table and returns Date + Total (US$mm).
+    Total is net flow: positive=inflow, negative=outflow.
+    """
+    url = "https://farside.co.uk/bitcoin-etf-flow-all-data/"
+    tables = pd.read_html(url)
+    df = tables[0].copy()
+
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Date" not in df.columns or "Total" not in df.columns:
+        return pd.DataFrame()
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    def to_float(x):
+        if pd.isna(x):
+            return np.nan
+        s = str(x).strip()
+        if s in {"-", ""}:
+            return np.nan
+        s = re.sub(r"[,\s]", "", s)
+        if s.startswith("(") and s.endswith(")"):
+            s = "-" + s[1:-1]
+        try:
+            return float(s)
+        except Exception:
+            return np.nan
+
+    df["Total"] = df["Total"].apply(to_float)
+    df = df.dropna(subset=["Date"]).sort_values("Date")
+    return df[["Date", "Total"]]
+
+
 # -----------------------------
 # Sidebar
 # -----------------------------
@@ -169,6 +205,63 @@ if sentiment_score is not None:
     st.sidebar.plotly_chart(fig_gauge, use_container_width=True)
 else:
     st.sidebar.info("Could not fetch sentiment data.")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
+
+flows = fetch_etf_total_flows_usdm()
+
+if flows.empty or flows["Total"].dropna().empty:
+    st.sidebar.info("ETF flow data unavailable.")
+else:
+    f = flows.dropna(subset=["Total"]).copy()
+
+    latest = f.iloc[-1]
+    latest_date = latest["Date"].date()
+    latest_total = float(latest["Total"])
+
+    # Latest label
+    if latest_total > 0:
+        latest_label = "🟢 Positive (Net inflow)"
+    elif latest_total < 0:
+        latest_label = "🔴 Negative (Net outflow)"
+    else:
+        latest_label = "🟡 Flat (0)"
+
+    st.sidebar.metric("Latest net flow", latest_label)
+    st.sidebar.caption(f"{latest_date} • Total: {latest_total:,.1f} US$mm")
+
+    # --- 7-entry rolling sums (trading-day entries) ---
+    last7_sum = float(f["Total"].tail(7).sum()) if len(f) >= 1 else np.nan
+    prev7_sum = float(f["Total"].iloc[-14:-7].sum()) if len(f) >= 14 else np.nan
+
+    st.sidebar.metric("7-day rolling net flow", f"{last7_sum:,.1f} US$mm")
+
+    # Trend label comparing last 7 vs previous 7
+    if np.isnan(prev7_sum):
+        st.sidebar.caption("7-day trend: Not enough history (need 14 entries).")
+    else:
+        delta = last7_sum - prev7_sum
+
+        # Avoid noisy flips: require both absolute and relative move
+        rel = abs(delta) / max(abs(prev7_sum), 1e-9)
+        if abs(delta) < 50 and rel < 0.25:
+            trend = "🟡 Flat / Mixed"
+        elif delta > 0:
+            trend = "🟢 Rising (more inflow)"
+        else:
+            trend = "🔴 Falling (more outflow)"
+
+        st.sidebar.metric("7-day trend", trend, f"Δ vs prior 7d: {delta:+,.1f} US$mm")
+
+    # Optional mini chart (last 20 entries)
+    mini = f.tail(20)
+    figf, axf = plt.subplots(figsize=(4.8, 2.4))
+    axf.bar(mini["Date"], mini["Total"], alpha=0.8)
+    axf.axhline(0, linestyle="--", linewidth=1)
+    axf.tick_params(axis="x", labelrotation=45, labelsize=8)
+    axf.tick_params(axis="y", labelsize=8)
+    st.sidebar.pyplot(figf)
 
 # -----------------------------
 # Data Loader
