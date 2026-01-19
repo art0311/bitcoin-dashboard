@@ -127,32 +127,47 @@ def market_strength_score(btc: pd.DataFrame):
 def fetch_spot_btc_etf_flow_usdm():
     """
     Returns latest daily net flow for US spot BTC ETFs in USD millions (float).
-    Parses the DefiLlama /etfs page (flows displayed there; source noted as Farside).
+    Tries DefiLlama mirror first (often more reliable on Streamlit Cloud), then main.
     """
-    url = "https://defillama.com/etfs"
-    try:
-        r = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15,
-        )
-        r.raise_for_status()
-        html = r.text
+    urls = [
+        "https://defillama2.llamao.fi/etfs",
+        "https://defillama.com/etfs",
+    ]
 
-        # More flexible patterns (handles Flows-$394.7m, Flows: -$394.7m, Flows $394.7m, etc.)
-        patterns = [
-            r"Bitcoin[\s\S]{0,800}?Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
-            r"Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",  # fallback if Bitcoin context changes
-        ]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
-        m = None
-        for p in patterns:
-            m = re.search(p, html, flags=re.IGNORECASE)
-            if m:
-                break
+    # Matches: Flows-$394.7m, Flows: -$394.7m, Flows $4.7m, etc.
+    pattern = r"Bitcoin[\s\S]{0,1200}?Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])"
 
-        if not m:
-            return None
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                continue
+            html = r.text
+
+            m = re.search(pattern, html, flags=re.IGNORECASE)
+            if not m:
+                continue
+
+            sign = -1.0 if (m.group(1) == "-") else 1.0
+            num = float(m.group(2).replace(",", ""))
+            unit = m.group(3).lower()
+
+            return sign * num * (1000.0 if unit == "b" else 1.0)
+        except Exception:
+            continue
+
+    return None
+
 
         sign = -1.0 if (m.group(1) == "-") else 1.0
         num = float(m.group(2).replace(",", ""))
@@ -164,14 +179,6 @@ def fetch_spot_btc_etf_flow_usdm():
 
     except Exception:
         return None
-
-@st.cache_data(ttl=900)
-def fetch_etf_total_flows_usdm_safe():
-    try:
-        return fetch_etf_total_flows_usdm()
-    except Exception:
-        return pd.DataFrame()
-
 
 
 # -----------------------------
@@ -230,75 +237,39 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
 
-# Daily (from DefiLlama)
 flow = fetch_spot_btc_etf_flow_usdm()
-# 7-day trend (from Farside table, if available)
-flows_df = fetch_etf_total_flows_usdm_safe()
 
-if flow is None and (flows_df is None or flows_df.empty or flows_df.get("Total") is None):
+# Store a small history in session_state so we can do 7-entry rolling trend
+# (persists while the app stays running)
+if "etf_flow_hist" not in st.session_state:
+    st.session_state.etf_flow_hist = []
+
+# Update history if we got a valid number
+if flow is not None and np.isfinite(flow):
+    hist = st.session_state.etf_flow_hist
+    # prevent duplicate repeats on reruns if the value hasn't changed
+    if not hist or hist[-1] != float(flow):
+        hist.append(float(flow))
+    # keep last 30 values
+    st.session_state.etf_flow_hist = hist[-30:]
+
+if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
     st.sidebar.info("ETF flow data unavailable.")
 else:
-    # --- Latest daily ---
-    if flow is not None:
-        label = "🟢 Net Inflow" if flow > 0 else ("🔴 Net Outflow" if flow < 0 else "🟡 Flat")
-        st.sidebar.metric("Latest Daily ETF Flow", f"{flow:,.1f} US$mm", label)
-    else:
-        st.sidebar.metric("Latest Daily ETF Flow", "N/A", "🟡 Unavailable")
+    label = "🟢 Net Inflow" if flow > 0 else ("🔴 Net Outflow" if flow < 0 else "🟡 Flat")
+    st.sidebar.metric("Latest Daily ETF Flow", f"{flow:,.1f} US$mm", label)
+    st.sidebar.caption("Source: DefiLlama (flows attributed to Farside on page)")
 
-    # --- 7-day rolling trend (if we have a dataframe) ---
-    if flows_df is not None and not flows_df.empty and "Total" in flows_df.columns:
-        f = flows_df.dropna(subset=["Total"]).copy()
+# --- 7-entry rolling trend label (based on stored history) ---
+hist = st.session_state.get("etf_flow_hist", [])
+if len(hist) >= 7:
+    last7_sum = float(np.sum(hist[-7:]))
+    st.sidebar.metric("7-entry rolling net flow", f"{last7_sum:,.1f} US$mm")
 
-        if len(f) >= 7:
-            last7_sum = float(f["Total"].tail(7).sum())
-            st.sidebar.metric("7-day rolling net flow", f"{last7_sum:,.1f} US$mm")
-
-        if len(f) >= 14:
-            prev7_sum = float(f["Total"].iloc[-14:-7].sum())
-            delta = last7_sum - prev7_sum
-
-            rel = abs(delta) / max(abs(prev7_sum), 1e-9)
-            if abs(delta) < 50 and rel < 0.25:
-                trend = "🟡 Flat / Mixed"
-            elif delta > 0:
-                trend = "🟢 Rising (more inflow)"
-            else:
-                trend = "🔴 Falling (more outflow)"
-
-            st.sidebar.metric("7-day trend", trend, f"Δ vs prior 7d: {delta:+,.1f} US$mm")
-        else:
-            st.sidebar.caption("7-day trend: Not enough history (need 14 entries).")
-
-        # Mini chart
-        mini = f.tail(20)
-        if not mini.empty and "Date" in mini.columns:
-            figf, axf = plt.subplots(figsize=(4.8, 2.4))
-            axf.bar(mini["Date"], mini["Total"], alpha=0.8)
-            axf.axhline(0, linestyle="--", linewidth=1)
-            axf.tick_params(axis="x", labelrotation=45, labelsize=8)
-            axf.tick_params(axis="y", labelsize=8)
-            st.sidebar.pyplot(figf)
-    else:
-        st.sidebar.caption("7-day rolling trend unavailable (source blocked).")
-
-    st.sidebar.caption("Source: Farside / DefiLlama")
-
-
-
-
-    # --- 7-entry rolling sums (trading-day entries) ---
-    last7_sum = float(f["Total"].tail(7).sum()) if len(f) >= 1 else np.nan
-    prev7_sum = float(f["Total"].iloc[-14:-7].sum()) if len(f) >= 14 else np.nan
-
-    st.sidebar.metric("7-day rolling net flow", f"{last7_sum:,.1f} US$mm")
-
-    # Trend label comparing last 7 vs previous 7
-    if np.isnan(prev7_sum):
-        st.sidebar.caption("7-day trend: Not enough history (need 14 entries).")
-    else:
+    if len(hist) >= 14:
+        prev7_sum = float(np.sum(hist[-14:-7]))
         delta = last7_sum - prev7_sum
 
-        # Avoid noisy flips: require both absolute and relative move
         rel = abs(delta) / max(abs(prev7_sum), 1e-9)
         if abs(delta) < 50 and rel < 0.25:
             trend = "🟡 Flat / Mixed"
@@ -307,16 +278,12 @@ else:
         else:
             trend = "🔴 Falling (more outflow)"
 
-        st.sidebar.metric("7-day trend", trend, f"Δ vs prior 7d: {delta:+,.1f} US$mm")
+        st.sidebar.metric("7-entry trend", trend, f"Δ vs prior 7: {delta:+,.1f} US$mm")
+    else:
+        st.sidebar.caption("7-entry trend: Need 14 values for comparison.")
+else:
+    st.sidebar.caption("7-entry trend: collecting data (need 7 refreshes).")
 
-    # Optional mini chart (last 20 entries)
-    mini = f.tail(20)
-    figf, axf = plt.subplots(figsize=(4.8, 2.4))
-    axf.bar(mini["Date"], mini["Total"], alpha=0.8)
-    axf.axhline(0, linestyle="--", linewidth=1)
-    axf.tick_params(axis="x", labelrotation=45, labelsize=8)
-    axf.tick_params(axis="y", labelsize=8)
-    st.sidebar.pyplot(figf)
 
 # -----------------------------
 # Data Loader
