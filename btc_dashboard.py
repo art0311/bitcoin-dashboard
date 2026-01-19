@@ -120,54 +120,46 @@ def market_strength_score(btc: pd.DataFrame):
 
     return score, label
 
-@st.cache_data(ttl=900)  # 15 min
-def fetch_etf_total_flows_usdm():
+# -----------------------------
+# Spot BTC ETF Daily Net Flow (US$mm) - robust (no read_html)
+# -----------------------------
+@st.cache_data(ttl=900)
+def fetch_spot_btc_etf_flow_usdm():
     """
-    Fetches Farside 'Bitcoin ETF Flow – All Data' and returns Date + Total (US$mm).
-    Uses requests + User-Agent to avoid blocking.
+    Returns latest daily net flow for US spot BTC ETFs in USD millions (float).
+    Source displayed on DefiLlama ETFs page (it labels flows and notes Source: Farside).
     """
-    url = "https://farside.co.uk/bitcoin-etf-flow-all-data/"
+    url = "https://defillama.com/etfs"
     try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        }
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        html = r.text
 
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
+        # Look for the first "Bitcoin ... Flows<value>" block in the Daily Stats section
+        # Examples seen on page: "Flows-$394.7m" or "Flows$4.7m"
+        m = re.search(
+            r"Bitcoin[\s\S]{0,400}?Flows\s*([+-])?\$?\s*([0-9.,]+)\s*([mb])",
+            html,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            return None
 
-        tables = pd.read_html(resp.text)
-        df = tables[0].copy()
+        sign = -1.0 if (m.group(1) == "-") else 1.0
+        num = float(m.group(2).replace(",", ""))
+        unit = m.group(3).lower()
 
-        df.columns = [str(c).strip() for c in df.columns]
-        if "Date" not in df.columns or "Total" not in df.columns:
-            return pd.DataFrame()
-
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
-        def to_float(x):
-            if pd.isna(x):
-                return np.nan
-            s = str(x).strip()
-            if s in {"-", ""}:
-                return np.nan
-            s = re.sub(r"[,\s]", "", s)
-            if s.startswith("(") and s.endswith(")"):
-                s = "-" + s[1:-1]
-            try:
-                return float(s)
-            except Exception:
-                return np.nan
-
-        df["Total"] = df["Total"].apply(to_float)
-        df = df.dropna(subset=["Date"]).sort_values("Date")
-        return df[["Date", "Total"]]
+        # Normalize to USD millions
+        flow_usdm = num * (1000.0 if unit == "b" else 1.0) * sign
+        return flow_usdm
 
     except Exception:
-        return pd.DataFrame()
+        return None
+
 
 
 # -----------------------------
@@ -224,27 +216,25 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
 
-flows = fetch_etf_total_flows_usdm()
+flow = fetch_spot_btc_etf_flow_usdm()
 
-if flows.empty or flows["Total"].dropna().empty:
+if flow is None:
     st.sidebar.info("ETF flow data unavailable.")
 else:
-    f = flows.dropna(subset=["Total"]).copy()
+    label = (
+        "🟢 Net Inflow" if flow > 0 else
+        "🔴 Net Outflow" if flow < 0 else
+        "🟡 Flat"
+    )
 
-    latest = f.iloc[-1]
-    latest_date = latest["Date"].date()
-    latest_total = float(latest["Total"])
+    st.sidebar.metric(
+        "Latest Daily ETF Flow",
+        f"{flow:,.1f} US$mm",
+        label
+    )
 
-    # Latest label
-    if latest_total > 0:
-        latest_label = "🟢 Positive (Net inflow)"
-    elif latest_total < 0:
-        latest_label = "🔴 Negative (Net outflow)"
-    else:
-        latest_label = "🟡 Flat (0)"
+    st.sidebar.caption("Source: Farside / DefiLlama")
 
-    st.sidebar.metric("Latest net flow", latest_label)
-    st.sidebar.caption(f"{latest_date} • Total: {latest_total:,.1f} US$mm")
 
     # --- 7-entry rolling sums (trading-day entries) ---
     last7_sum = float(f["Total"].tail(7).sum()) if len(f) >= 1 else np.nan
