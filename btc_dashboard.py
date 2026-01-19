@@ -216,7 +216,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
 
-flow = fetch_spot_btc_etf_flow_usdm()
+flow = fetch_spot_btc_etf_flow_usdm()  # <-- this must exist above the if
 
 if flow is None:
     st.sidebar.info("ETF flow data unavailable.")
@@ -234,6 +234,7 @@ else:
     )
 
     st.sidebar.caption("Source: Farside / DefiLlama")
+
 
 
     # --- 7-entry rolling sums (trading-day entries) ---
