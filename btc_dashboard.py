@@ -229,7 +229,7 @@ levels = detect_levels(btc["Close"]) if (has_data(btc, ["Close"]) and "Support/R
 st.title("📊 Bitcoin Live Dashboard")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
 if has_data(btc, ["Close"]) and len(btc) >= 2:
     price = float(btc["Close"].iloc[-1])
@@ -239,8 +239,11 @@ if has_data(btc, ["Close"]) and len(btc) >= 2:
 
     s1 = safe_last(btc["SMA_short"])
     s2 = safe_last(btc["SMA_medium"])
+    s3 = safe_last(btc["SMA_long"])
+
     col2.metric("SMA Short", f"${s1:,.0f}" if s1 is not None else "N/A")
     col3.metric("SMA Medium", f"${s2:,.0f}" if s2 is not None else "N/A")
+    col4.metric("SMA Long", f"${s3:,.0f}" if s3 is not None else "N/A")
 else:
     col1.metric("BTC Price", "Loading...", "")
     col2.metric("SMA Short", "Loading...")
