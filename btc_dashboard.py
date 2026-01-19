@@ -123,36 +123,51 @@ def market_strength_score(btc: pd.DataFrame):
 @st.cache_data(ttl=900)  # 15 min
 def fetch_etf_total_flows_usdm():
     """
-    Pulls Farside 'Bitcoin ETF Flow – All Data' table and returns Date + Total (US$mm).
-    Total is net flow: positive=inflow, negative=outflow.
+    Fetches Farside 'Bitcoin ETF Flow – All Data' and returns Date + Total (US$mm).
+    Uses requests + User-Agent to avoid blocking.
     """
     url = "https://farside.co.uk/bitcoin-etf-flow-all-data/"
-    tables = pd.read_html(url)
-    df = tables[0].copy()
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
 
-    df.columns = [str(c).strip() for c in df.columns]
-    if "Date" not in df.columns or "Total" not in df.columns:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+
+        tables = pd.read_html(resp.text)
+        df = tables[0].copy()
+
+        df.columns = [str(c).strip() for c in df.columns]
+        if "Date" not in df.columns or "Total" not in df.columns:
+            return pd.DataFrame()
+
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+        def to_float(x):
+            if pd.isna(x):
+                return np.nan
+            s = str(x).strip()
+            if s in {"-", ""}:
+                return np.nan
+            s = re.sub(r"[,\s]", "", s)
+            if s.startswith("(") and s.endswith(")"):
+                s = "-" + s[1:-1]
+            try:
+                return float(s)
+            except Exception:
+                return np.nan
+
+        df["Total"] = df["Total"].apply(to_float)
+        df = df.dropna(subset=["Date"]).sort_values("Date")
+        return df[["Date", "Total"]]
+
+    except Exception:
         return pd.DataFrame()
-
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
-    def to_float(x):
-        if pd.isna(x):
-            return np.nan
-        s = str(x).strip()
-        if s in {"-", ""}:
-            return np.nan
-        s = re.sub(r"[,\s]", "", s)
-        if s.startswith("(") and s.endswith(")"):
-            s = "-" + s[1:-1]
-        try:
-            return float(s)
-        except Exception:
-            return np.nan
-
-    df["Total"] = df["Total"].apply(to_float)
-    df = df.dropna(subset=["Date"]).sort_values("Date")
-    return df[["Date", "Total"]]
 
 
 # -----------------------------
