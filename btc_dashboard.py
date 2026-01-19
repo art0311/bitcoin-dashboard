@@ -127,7 +127,7 @@ def market_strength_score(btc: pd.DataFrame):
 def fetch_spot_btc_etf_flow_usdm():
     """
     Returns latest daily net flow for US spot BTC ETFs in USD millions (float).
-    Tries DefiLlama mirror first (often more reliable on Streamlit Cloud), then main.
+    Tries DefiLlama mirror first, then main site.
     """
     urls = [
         "https://defillama2.llamao.fi/etfs",
@@ -144,25 +144,32 @@ def fetch_spot_btc_etf_flow_usdm():
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    # Matches: Flows-$394.7m, Flows: -$394.7m, Flows $4.7m, etc.
-    pattern = r"Bitcoin[\s\S]{0,1200}?Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])"
+    pattern = (
+        r"Bitcoin[\s\S]{0,1200}?"
+        r"Flows[^0-9\-+]*"
+        r"([+-])?\$?\s*"
+        r"([0-9][0-9,\.]*)\s*"
+        r"([mMbB])"
+    )
 
     for url in urls:
         try:
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code != 200:
                 continue
-            html = r.text
 
+            html = r.text
             m = re.search(pattern, html, flags=re.IGNORECASE)
+
             if not m:
                 continue
 
-            sign = -1.0 if (m.group(1) == "-") else 1.0
+            sign = -1.0 if m.group(1) == "-" else 1.0
             num = float(m.group(2).replace(",", ""))
             unit = m.group(3).lower()
 
             return sign * num * (1000.0 if unit == "b" else 1.0)
+
         except Exception:
             continue
 
