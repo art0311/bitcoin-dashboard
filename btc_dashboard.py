@@ -127,25 +127,30 @@ def market_strength_score(btc: pd.DataFrame):
 def fetch_spot_btc_etf_flow_usdm():
     """
     Returns latest daily net flow for US spot BTC ETFs in USD millions (float).
-    Source displayed on DefiLlama ETFs page (it labels flows and notes Source: Farside).
+    Parses the DefiLlama /etfs page (flows displayed there; source noted as Farside).
     """
     url = "https://defillama.com/etfs"
     try:
         r = requests.get(
             url,
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
+            timeout=15,
         )
         r.raise_for_status()
         html = r.text
 
-        # Look for the first "Bitcoin ... Flows<value>" block in the Daily Stats section
-        # Examples seen on page: "Flows-$394.7m" or "Flows$4.7m"
-        m = re.search(
-            r"Bitcoin[\s\S]{0,400}?Flows\s*([+-])?\$?\s*([0-9.,]+)\s*([mb])",
-            html,
-            flags=re.IGNORECASE,
-        )
+        # More flexible patterns (handles Flows-$394.7m, Flows: -$394.7m, Flows $394.7m, etc.)
+        patterns = [
+            r"Bitcoin[\s\S]{0,800}?Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
+            r"Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",  # fallback if Bitcoin context changes
+        ]
+
+        m = None
+        for p in patterns:
+            m = re.search(p, html, flags=re.IGNORECASE)
+            if m:
+                break
+
         if not m:
             return None
 
@@ -162,6 +167,7 @@ def fetch_spot_btc_etf_flow_usdm():
 
 
 
+
 # -----------------------------
 # Sidebar
 # -----------------------------
@@ -175,6 +181,8 @@ period = st.sidebar.selectbox(
 )
 
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
+
+
 
 # -----------------------------
 # Fear & Greed (Sidebar Gauge)
@@ -217,6 +225,9 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
 
 flow = fetch_spot_btc_etf_flow_usdm()  # <-- this must exist above the if
+
+st.sidebar.caption(f"ETF flow debug: {flow}")
+
 
 if flow is None:
     st.sidebar.info("ETF flow data unavailable.")
