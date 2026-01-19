@@ -24,6 +24,41 @@ def safe_last(x):
         return v if np.isfinite(v) else None
     except Exception:
         return None
+def market_regime(btc: pd.DataFrame):
+    """
+    Returns (label, emoji, details_dict) using Close, SMA_long, MACD.
+    """
+    if btc is None or btc.empty or len(btc) < 15:
+        return "Unknown", "⚪", {}
+
+    if not all(c in btc.columns for c in ["Close", "SMA_long", "MACD"]):
+        return "Unknown", "⚪", {}
+
+    close = btc["Close"].dropna()
+    sma_long = btc["SMA_long"].dropna()
+    macd = btc["MACD"].dropna()
+
+    if close.empty or sma_long.empty or macd.empty:
+        return "Unknown", "⚪", {}
+
+    price = float(close.iloc[-1])
+    smaL = float(sma_long.iloc[-1])
+    macd_last = float(macd.iloc[-1])
+
+    # SMA long slope (lookback bars, adaptive)
+    lookback = min(10, len(sma_long) - 1)
+    if lookback < 1:
+        slope = 0.0
+    else:
+        slope = float(sma_long.iloc[-1] - sma_long.iloc[-1 - lookback])
+
+    # Regime rules
+    if price > smaL and slope > 0 and macd_last > 0:
+        return "Bull", "🟢", {"slope": slope, "macd": macd_last}
+    if price < smaL and slope < 0 and macd_last < 0:
+        return "Bear", "🔴", {"slope": slope, "macd": macd_last}
+    return "Range / Transition", "🟡", {"slope": slope, "macd": macd_last}
+
 
 # -----------------------------
 # Sidebar
@@ -229,12 +264,13 @@ levels = detect_levels(btc["Close"]) if (has_data(btc, ["Close"]) and "Support/R
 st.title("📊 Bitcoin Live Dashboard")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 if has_data(btc, ["Close"]) and len(btc) >= 2:
     price = float(btc["Close"].iloc[-1])
     prev = float(btc["Close"].iloc[-2])
     change = (price - prev) / prev * 100 if prev != 0 else 0.0
+
     col1.metric("BTC Price", f"${price:,.0f}", f"{change:.2f}%")
 
     s1 = safe_last(btc["SMA_short"])
@@ -244,10 +280,22 @@ if has_data(btc, ["Close"]) and len(btc) >= 2:
     col2.metric("SMA Short", f"${s1:,.0f}" if s1 is not None else "N/A")
     col3.metric("SMA Medium", f"${s2:,.0f}" if s2 is not None else "N/A")
     col4.metric("SMA Long", f"${s3:,.0f}" if s3 is not None else "N/A")
+
+    regime, regime_emoji, details = market_regime(btc)
+    col5.metric("Market Regime", f"{regime_emoji} {regime}")
+
 else:
     col1.metric("BTC Price", "Loading...", "")
     col2.metric("SMA Short", "Loading...")
     col3.metric("SMA Medium", "Loading...")
+    col4.metric("SMA Long", "Loading...")
+    col5.metric("Market Regime", "Loading...")
+    
+with st.expander("How Market Regime is determined"):
+    st.write("🟢 Bull: Price > SMA Long, SMA Long slope up, MACD > 0")
+    st.write("🔴 Bear: Price < SMA Long, SMA Long slope down, MACD < 0")
+    st.write("🟡 Range/Transition: anything else")
+
 
 # -----------------------------
 # Price + Overlays (controlled by sidebar)
