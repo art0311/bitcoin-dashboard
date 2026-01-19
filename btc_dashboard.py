@@ -24,20 +24,16 @@ def safe_last(x):
         return v if np.isfinite(v) else None
     except Exception:
         return None
+
 def market_regime(btc: pd.DataFrame):
-    """
-    Returns (label, emoji, details_dict) using Close, SMA_long, MACD.
-    """
     if btc is None or btc.empty or len(btc) < 15:
         return "Unknown", "⚪", {}
-
     if not all(c in btc.columns for c in ["Close", "SMA_long", "MACD"]):
         return "Unknown", "⚪", {}
 
     close = btc["Close"].dropna()
     sma_long = btc["SMA_long"].dropna()
     macd = btc["MACD"].dropna()
-
     if close.empty or sma_long.empty or macd.empty:
         return "Unknown", "⚪", {}
 
@@ -45,20 +41,83 @@ def market_regime(btc: pd.DataFrame):
     smaL = float(sma_long.iloc[-1])
     macd_last = float(macd.iloc[-1])
 
-    # SMA long slope (lookback bars, adaptive)
     lookback = min(10, len(sma_long) - 1)
-    if lookback < 1:
-        slope = 0.0
-    else:
-        slope = float(sma_long.iloc[-1] - sma_long.iloc[-1 - lookback])
+    slope = float(sma_long.iloc[-1] - sma_long.iloc[-1 - lookback]) if lookback >= 1 else 0.0
 
-    # Regime rules
     if price > smaL and slope > 0 and macd_last > 0:
         return "Bull", "🟢", {"slope": slope, "macd": macd_last}
     if price < smaL and slope < 0 and macd_last < 0:
         return "Bear", "🔴", {"slope": slope, "macd": macd_last}
     return "Range / Transition", "🟡", {"slope": slope, "macd": macd_last}
 
+def distance_from_sma_long_pct(btc: pd.DataFrame):
+    if not has_data(btc, ["Close", "SMA_long"]):
+        return None
+    c = btc["Close"].dropna()
+    s = btc["SMA_long"].dropna()
+    if c.empty or s.empty:
+        return None
+    price = float(c.iloc[-1])
+    smaL = float(s.iloc[-1])
+    if smaL == 0:
+        return None
+    return (price - smaL) / smaL * 100.0
+
+def market_strength_score(btc: pd.DataFrame):
+    """
+    Simple 0-100 score using signals you already have:
+    +20 Price > SMA Long
+    +20 SMA Long slope up
+    +20 MACD > 0
+    +20 OBV rising (vs 10 bars ago)
+    +20 RSI >= 50
+    """
+    if btc is None or btc.empty or len(btc) < 15:
+        return None, "Unknown"
+
+    needed = ["Close", "SMA_long", "MACD", "OBV", "RSI"]
+    if not all(c in btc.columns for c in needed):
+        return None, "Unknown"
+
+    close = btc["Close"].dropna()
+    smaL = btc["SMA_long"].dropna()
+    macd = btc["MACD"].dropna()
+    obv = btc["OBV"].dropna()
+    rsi = btc["RSI"].dropna()
+
+    if close.empty or smaL.empty or macd.empty or obv.empty or rsi.empty:
+        return None, "Unknown"
+
+    price = float(close.iloc[-1])
+    sma_last = float(smaL.iloc[-1])
+    macd_last = float(macd.iloc[-1])
+    rsi_last = float(rsi.iloc[-1])
+
+    lookback = min(10, len(smaL) - 1)
+    sma_slope = float(smaL.iloc[-1] - smaL.iloc[-1 - lookback]) if lookback >= 1 else 0.0
+
+    obv_lookback = min(10, len(obv) - 1)
+    obv_trend = float(obv.iloc[-1] - obv.iloc[-1 - obv_lookback]) if obv_lookback >= 1 else 0.0
+
+    score = 0
+    score += 20 if price > sma_last else 0
+    score += 20 if sma_slope > 0 else 0
+    score += 20 if macd_last > 0 else 0
+    score += 20 if obv_trend > 0 else 0
+    score += 20 if rsi_last >= 50 else 0
+
+    if score >= 80:
+        label = "Strong Bullish"
+    elif score >= 60:
+        label = "Bullish"
+    elif score >= 40:
+        label = "Neutral"
+    elif score >= 20:
+        label = "Bearish"
+    else:
+        label = "Strong Bearish"
+
+    return score, label
 
 # -----------------------------
 # Sidebar
@@ -73,36 +132,6 @@ period = st.sidebar.selectbox(
 )
 
 predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
-
-# -----------------------------
-# Chart Overlay Controls (ONLY affects main chart)
-# -----------------------------
-st.sidebar.markdown("---")
-st.sidebar.subheader("📌 Chart Overlays")
-
-OVERLAY_OPTIONS = [
-    "SMA Short", "SMA Medium", "SMA Long",
-    "VWAP",
-    "Bollinger Bands",
-    "Support/Resistance",
-]
-
-# initialize once
-if "overlay_selected" not in st.session_state:
-    st.session_state.overlay_selected = ["SMA Short", "SMA Medium", "VWAP", "Bollinger Bands"]
-
-b1, b2 = st.sidebar.columns(2)
-if b1.button("Select all"):
-    st.session_state.overlay_selected = OVERLAY_OPTIONS
-if b2.button("Clear all"):
-    st.session_state.overlay_selected = []
-
-overlay_selected = st.sidebar.multiselect(
-    "Show overlays on chart",
-    options=OVERLAY_OPTIONS,
-    default=st.session_state.overlay_selected,
-    key="overlay_selected",
-)
 
 # -----------------------------
 # Fear & Greed (Sidebar Gauge)
@@ -171,7 +200,7 @@ def load_data(symbol, period):
 btc = load_data(symbol, period)
 
 # -----------------------------
-# Indicators (INDEX-SAFE)
+# Indicators (INDEX-SAFE) + Adaptive SMA windows
 # -----------------------------
 if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
     close = btc["Close"].astype(float)
@@ -181,10 +210,18 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
 
     n = len(btc)
 
-    # Adaptive windows
-    sma_short_w = max(3, min(5, n))
-    sma_med_w   = max(5, min(20, n))
-    sma_long_w  = max(10, min(50, n))
+    # Better adaptive SMA windows (scale with data length)
+    sma_short_w = int(max(5, round(n * 0.05)))
+    sma_med_w   = int(max(10, round(n * 0.15)))
+    sma_long_w  = int(max(20, round(n * 0.35)))
+    sma_long_w = min(sma_long_w, max(30, n - 2))
+    if sma_med_w <= sma_short_w:
+        sma_med_w = sma_short_w + 1
+    if sma_long_w <= sma_med_w:
+        sma_long_w = sma_med_w + 1
+    sma_short_w = min(sma_short_w, n)
+    sma_med_w   = min(sma_med_w, n)
+    sma_long_w  = min(sma_long_w, n)
 
     btc["SMA_short"]  = close.rolling(sma_short_w, min_periods=1).mean()
     btc["SMA_medium"] = close.rolling(sma_med_w,   min_periods=1).mean()
@@ -221,7 +258,6 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
         fast, slow, sig = 6, 13, 4
     else:
         fast, slow, sig = 12, 26, 9
-
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
     btc["MACD"] = ema_fast - ema_slow
@@ -256,15 +292,15 @@ def detect_levels(series, window=20, tolerance=0.015):
                 clustered.append(lvl)
     return clustered
 
-levels = detect_levels(btc["Close"]) if (has_data(btc, ["Close"]) and "Support/Resistance" in overlay_selected) else []
+levels = detect_levels(btc["Close"]) if has_data(btc, ["Close"]) else []
 
 # -----------------------------
-# Header + Metrics
+# Header + Top Metrics (now includes Score + Distance)
 # -----------------------------
 st.title("📊 Bitcoin Live Dashboard")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
 
 if has_data(btc, ["Close"]) and len(btc) >= 2:
     price = float(btc["Close"].iloc[-1])
@@ -276,29 +312,25 @@ if has_data(btc, ["Close"]) and len(btc) >= 2:
     s1 = safe_last(btc["SMA_short"])
     s2 = safe_last(btc["SMA_medium"])
     s3 = safe_last(btc["SMA_long"])
-
     col2.metric("SMA Short", f"${s1:,.0f}" if s1 is not None else "N/A")
     col3.metric("SMA Medium", f"${s2:,.0f}" if s2 is not None else "N/A")
     col4.metric("SMA Long", f"${s3:,.0f}" if s3 is not None else "N/A")
 
-    regime, regime_emoji, details = market_regime(btc)
-    col5.metric("Market Regime", f"{regime_emoji} {regime}")
+    regime, emoji, _ = market_regime(btc)
+    col5.metric("Market Regime", f"{emoji} {regime}")
+
+    dist = distance_from_sma_long_pct(btc)
+    col6.metric("Dist vs SMA Long", f"{dist:+.1f}%" if dist is not None else "N/A")
+
+    score, score_label = market_strength_score(btc)
+    col7.metric("Strength Score", f"{score}/100" if score is not None else "N/A", score_label)
 
 else:
-    col1.metric("BTC Price", "Loading...", "")
-    col2.metric("SMA Short", "Loading...")
-    col3.metric("SMA Medium", "Loading...")
-    col4.metric("SMA Long", "Loading...")
-    col5.metric("Market Regime", "Loading...")
-    
-with st.expander("How Market Regime is determined"):
-    st.write("🟢 Bull: Price > SMA Long, SMA Long slope up, MACD > 0")
-    st.write("🔴 Bear: Price < SMA Long, SMA Long slope down, MACD < 0")
-    st.write("🟡 Range/Transition: anything else")
-
+    for c in [col1, col2, col3, col4, col5, col6, col7]:
+        c.metric("Loading...", "")
 
 # -----------------------------
-# Price + Overlays (controlled by sidebar)
+# Price + Overlays (SMA Long slope coloring)
 # -----------------------------
 st.subheader("📈 Price + Indicators")
 
@@ -306,24 +338,27 @@ if has_data(btc, ["Close"]):
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc["Close"], label="Price")
 
-    # Only plot what is selected
-    if "SMA Short" in overlay_selected:
-        ax.plot(btc.index, btc["SMA_short"], label="SMA Short")
-    if "SMA Medium" in overlay_selected:
-        ax.plot(btc.index, btc["SMA_medium"], label="SMA Medium")
-    if "SMA Long" in overlay_selected:
-        ax.plot(btc.index, btc["SMA_long"], label="SMA Long")
+    ax.plot(btc.index, btc["SMA_short"], label="SMA Short")
+    ax.plot(btc.index, btc["SMA_medium"], label="SMA Medium")
 
-    if "VWAP" in overlay_selected:
-        ax.plot(btc.index, btc["VWAP"], label="VWAP", linestyle="--")
+    # SMA Long colored by slope
+    sma_long_series = btc["SMA_long"].dropna()
+    sma_color = "grey"
+    if len(sma_long_series) >= 11:
+        slope = float(sma_long_series.iloc[-1] - sma_long_series.iloc[-11])
+        if slope > 0:
+            sma_color = "green"
+        elif slope < 0:
+            sma_color = "red"
 
-    if "Bollinger Bands" in overlay_selected:
-        ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
-        ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
+    ax.plot(btc.index, btc["SMA_long"], label="SMA Long", linewidth=2.4, color=sma_color)
 
-    if "Support/Resistance" in overlay_selected:
-        for lvl in levels[-8:]:
-            ax.axhline(lvl, linestyle="--", alpha=0.35)
+    ax.plot(btc.index, btc["VWAP"], label="VWAP", linestyle="--")
+    ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
+    ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
+
+    for lvl in levels[-8:]:
+        ax.axhline(lvl, linestyle="--", alpha=0.35)
 
     ax.set_ylabel("USD")
     ax.legend()
@@ -413,6 +448,7 @@ if has_data(btc, ["Close"]) and len(btc) > 100:
     st.caption("⚠️ Forecasts are experimental, not financial advice.")
 else:
     st.info("Not enough data for AI predictions yet.")
+
 
 
 
