@@ -165,6 +165,12 @@ def fetch_spot_btc_etf_flow_usdm():
     except Exception:
         return None
 
+@st.cache_data(ttl=900)
+def fetch_etf_total_flows_usdm_safe():
+    try:
+        return fetch_etf_total_flows_usdm()
+    except Exception:
+        return pd.DataFrame()
 
 
 
@@ -224,27 +230,59 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
 
-flow = fetch_spot_btc_etf_flow_usdm()  # <-- this must exist above the if
+# Daily (from DefiLlama)
+flow = fetch_spot_btc_etf_flow_usdm()
+# 7-day trend (from Farside table, if available)
+flows_df = fetch_etf_total_flows_usdm_safe()
 
-st.sidebar.caption(f"ETF flow debug: {flow}")
-
-
-if flow is None:
+if flow is None and (flows_df is None or flows_df.empty or flows_df.get("Total") is None):
     st.sidebar.info("ETF flow data unavailable.")
 else:
-    label = (
-        "🟢 Net Inflow" if flow > 0 else
-        "🔴 Net Outflow" if flow < 0 else
-        "🟡 Flat"
-    )
+    # --- Latest daily ---
+    if flow is not None:
+        label = "🟢 Net Inflow" if flow > 0 else ("🔴 Net Outflow" if flow < 0 else "🟡 Flat")
+        st.sidebar.metric("Latest Daily ETF Flow", f"{flow:,.1f} US$mm", label)
+    else:
+        st.sidebar.metric("Latest Daily ETF Flow", "N/A", "🟡 Unavailable")
 
-    st.sidebar.metric(
-        "Latest Daily ETF Flow",
-        f"{flow:,.1f} US$mm",
-        label
-    )
+    # --- 7-day rolling trend (if we have a dataframe) ---
+    if flows_df is not None and not flows_df.empty and "Total" in flows_df.columns:
+        f = flows_df.dropna(subset=["Total"]).copy()
+
+        if len(f) >= 7:
+            last7_sum = float(f["Total"].tail(7).sum())
+            st.sidebar.metric("7-day rolling net flow", f"{last7_sum:,.1f} US$mm")
+
+        if len(f) >= 14:
+            prev7_sum = float(f["Total"].iloc[-14:-7].sum())
+            delta = last7_sum - prev7_sum
+
+            rel = abs(delta) / max(abs(prev7_sum), 1e-9)
+            if abs(delta) < 50 and rel < 0.25:
+                trend = "🟡 Flat / Mixed"
+            elif delta > 0:
+                trend = "🟢 Rising (more inflow)"
+            else:
+                trend = "🔴 Falling (more outflow)"
+
+            st.sidebar.metric("7-day trend", trend, f"Δ vs prior 7d: {delta:+,.1f} US$mm")
+        else:
+            st.sidebar.caption("7-day trend: Not enough history (need 14 entries).")
+
+        # Mini chart
+        mini = f.tail(20)
+        if not mini.empty and "Date" in mini.columns:
+            figf, axf = plt.subplots(figsize=(4.8, 2.4))
+            axf.bar(mini["Date"], mini["Total"], alpha=0.8)
+            axf.axhline(0, linestyle="--", linewidth=1)
+            axf.tick_params(axis="x", labelrotation=45, labelsize=8)
+            axf.tick_params(axis="y", labelsize=8)
+            st.sidebar.pyplot(figf)
+    else:
+        st.sidebar.caption("7-day rolling trend unavailable (source blocked).")
 
     st.sidebar.caption("Source: Farside / DefiLlama")
+
 
 
 
