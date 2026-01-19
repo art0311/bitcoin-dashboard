@@ -175,7 +175,6 @@ def fetch_spot_btc_etf_flow_usdm():
 
     return None
 
-
         sign = -1.0 if (m.group(1) == "-") else 1.0
         num = float(m.group(2).replace(",", ""))
         unit = m.group(3).lower()
