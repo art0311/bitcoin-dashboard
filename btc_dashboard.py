@@ -413,7 +413,7 @@ def detect_levels(series, window=20, tolerance=0.015, pivot_eps=0.002):
 
     return clustered
 
-
+st.caption(f"S/R debug — n={len(btc)}, window={sr_window}, levels={len(levels)}")
 
 # Adaptive support/resistance window
 if has_data(btc, ["Close"]):
@@ -423,7 +423,7 @@ if has_data(btc, ["Close"]):
 else:
     levels = []
 
-st.caption(f"S/R debug — n={len(btc)}, window={sr_window}, levels={len(levels)}")
+
 
 # -----------------------------
 # Header + Top Metrics (now includes Score + Distance)
