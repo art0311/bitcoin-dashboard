@@ -371,70 +371,59 @@ else:
 # -----------------------------
 # Support & Resistance
 # -----------------------------
-def detect_levels(series, window=20, tolerance=0.015, pivot_eps=0.002):
-    """
-    Robust S/R detection:
-    - Works on short ranges like 1mo
-    - Uses a centered window (includes i+window)
-    - Uses epsilon tolerance so we don't require exact equality
-    """
+# -----------------------------
+# Support & Resistance (separate supports/resistances)
+# -----------------------------
+def detect_support_resistance(series, window=20, tolerance=0.015, pivot_eps=0.002):
     prices = pd.Series(series).dropna().to_numpy(dtype=float)
     n = len(prices)
     if n < (2 * window + 1):
-        return []
+        return [], []
 
-    raw_levels = []
+    supports = []
+    resistances = []
+
     for i in range(window, n - window):
-        seg = prices[i - window : i + window + 1]  # +1 includes right side
+        seg = prices[i - window : i + window + 1]
         cur = prices[i]
         seg_min = float(np.min(seg))
         seg_max = float(np.max(seg))
 
-        # "Near-min" or "near-max" instead of exact equality
-        is_support = cur <= seg_min * (1 + pivot_eps)
-        is_resist  = cur >= seg_max * (1 - pivot_eps)
+        # Near-min / near-max pivots
+        if cur <= seg_min * (1 + pivot_eps):
+            supports.append(cur)
+        if cur >= seg_max * (1 - pivot_eps):
+            resistances.append(cur)
 
-        if is_support or is_resist:
-            raw_levels.append(cur)
-
-    if not raw_levels:
-        return []
-
-    raw_levels = sorted(raw_levels)
-
-    # Cluster close-by levels together
-    clustered = []
-    for lvl in raw_levels:
-        if not clustered:
-            clustered.append(lvl)
-        else:
+    def cluster(levels):
+        if not levels:
+            return []
+        levels = sorted(levels)
+        clustered = [levels[0]]
+        for lvl in levels[1:]:
             if abs(lvl - clustered[-1]) / max(abs(clustered[-1]), 1e-9) > tolerance:
                 clustered.append(lvl)
+        return clustered
 
-    return clustered
+    return cluster(supports), cluster(resistances)
 
 
-# Adaptive support/resistance window (works for 1mo AND long timelines)
+# Adaptive window per range (works across all)
+supports, resistances = [], []
 sr_window = None
-levels = []
 
 if has_data(btc, ["Close"]):
     n = len(btc)
-
-    # Scale window with dataset size:
-    # - small enough for 1mo (~20 rows)
-    # - larger for 1y+ so pivots are meaningful
-    sr_window = int(np.clip(n * 0.08, 5, 40))   # 8% of bars, min 5, max 40
-
-    # Tolerance can scale a bit too (longer timelines = slightly tighter clustering)
+    sr_window = int(np.clip(n * 0.12, 4, 40))  # good across 1mo -> max
     sr_tol = 0.02 if n < 60 else 0.015
 
-    levels = detect_levels(
+    supports, resistances = detect_support_resistance(
         btc["Close"],
         window=sr_window,
         tolerance=sr_tol,
         pivot_eps=0.002
     )
+
 
 
 
@@ -503,43 +492,61 @@ if has_data(btc, ["Close"]):
     ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
     ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
 
-# -----------------------------
-# Support / Resistance lines + labels
-# -----------------------------
-for lvl in levels[-8:]:
 
-    # horizontal line
-    ax.axhline(
-        lvl,
-        linestyle="--",
-        linewidth=1.4,
-        alpha=0.75,
-        color="steelblue"
+# -----------------------------
+# Draw Supports (multiple) + ONE Resistance (nearest above price)
+# -----------------------------
+price_now = float(btc["Close"].iloc[-1])
+
+# Supports: keep only those below price, choose a few closest ones
+support_below = [s for s in supports if s < price_now]
+support_below = sorted(support_below)[-6:]  # last 6 closest supports
+
+for lvl in support_below:
+    ax.axhline(lvl, linestyle="--", linewidth=1.4, alpha=0.85, color="green")
+    ax.text(
+        btc.index[-1], lvl, f"{lvl:,.0f}",
+        va="center", ha="left", fontsize=9, color="green",
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=2)
     )
 
-    # price label on right edge
+# ONE Resistance: nearest above current price
+res_above = [r for r in resistances if r > price_now]
+
+if res_above:
+    # Normal case — resistance above price
+    r1 = min(res_above)
+
+else:
+    # Fallback — price already above all resistances
+    r1 = max(resistances) if resistances else None
+
+if r1 is not None:
+    ax.axhline(
+        r1,
+        linestyle="--",
+        linewidth=2.2,
+        alpha=0.95,
+        color="red"
+    )
+
     ax.text(
-        btc.index[-1],      # far right of chart
-        lvl,
-        f"{lvl:,.0f}",
+        btc.index[-1],
+        r1,
+        f"R: {r1:,.0f}",
         va="center",
         ha="left",
         fontsize=9,
-        color="steelblue",
+        color="red",
         bbox=dict(
             facecolor="white",
             edgecolor="none",
-            alpha=0.75,
+            alpha=0.80,
             pad=2
         )
     )
 
 
-    ax.set_ylabel("USD")
-    ax.legend()
-    st.pyplot(fig)
-else:
-    st.info("Not enough data to plot price.")
 
 # -----------------------------
 # Volume
