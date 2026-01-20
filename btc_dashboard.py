@@ -467,34 +467,58 @@ else:
 # -----------------------------
 st.subheader("📈 Price + Indicators")
 
-st.caption(
-    f"S/R debug — n={len(btc)}, window={sr_window}, "
-    f"supports={len(supports)}, resistances={len(resistances)}"
-)
-
+# Debug (optional)
+# st.caption(f"S/R debug — n={len(btc)}, window={sr_window}, supports={len(supports)}, resistances={len(resistances)}")
 
 if has_data(btc, ["Close"]):
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc["Close"], label="Price")
 
-    ax.plot(btc.index, btc["SMA_short"], label="SMA Short")
-    ax.plot(btc.index, btc["SMA_medium"], label="SMA Medium")
+    # Overlays (only plot if column exists)
+    if "SMA_short" in btc.columns:  ax.plot(btc.index, btc["SMA_short"], label="SMA Short")
+    if "SMA_medium" in btc.columns: ax.plot(btc.index, btc["SMA_medium"], label="SMA Medium")
+    if "SMA_long" in btc.columns:   ax.plot(btc.index, btc["SMA_long"], label="SMA Long", linewidth=2.0)
 
-    # SMA Long colored by slope
-    sma_long_series = btc["SMA_long"].dropna()
-    sma_color = "grey"
-    if len(sma_long_series) >= 11:
-        slope = float(sma_long_series.iloc[-1] - sma_long_series.iloc[-11])
-        if slope > 0:
-            sma_color = "green"
-        elif slope < 0:
-            sma_color = "red"
+    if "VWAP" in btc.columns:       ax.plot(btc.index, btc["VWAP"], label="VWAP", linestyle="--")
+    if "BB_upper" in btc.columns:   ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
+    if "BB_lower" in btc.columns:   ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
 
-    ax.plot(btc.index, btc["SMA_long"], label="SMA Long", linewidth=2.4, color=sma_color)
+    # -----------------------------
+    # Support / Resistance with labels
+    # -----------------------------
+    price_now = float(btc["Close"].iloc[-1])
 
-    ax.plot(btc.index, btc["VWAP"], label="VWAP", linestyle="--")
-    ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
-    ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
+    # Supports: take closest supports below price
+    support_below = [s for s in supports if s < price_now]
+    support_below = sorted(support_below)[-6:]  # up to 6 supports
+
+    for lvl in support_below:
+        ax.axhline(lvl, linestyle="--", linewidth=1.3, alpha=0.85)
+        ax.text(
+            btc.index[-1], lvl, f"S: {lvl:,.0f}",
+            va="center", ha="left", fontsize=9,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=2)
+        )
+
+    # ONE Resistance: nearest above price, with fallback
+    res_above = [r for r in resistances if r > price_now]
+    r1 = min(res_above) if res_above else (max(resistances) if resistances else None)
+
+    if r1 is not None:
+        ax.axhline(r1, linestyle="--", linewidth=2.0, alpha=0.95)
+        ax.text(
+            btc.index[-1], r1, f"R: {r1:,.0f}",
+            va="center", ha="left", fontsize=9,
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=2)
+        )
+
+    ax.set_ylabel("USD")
+    ax.legend()
+    st.pyplot(fig)
+
+else:
+    st.info("Not enough data to plot price.")
+
 
 
 # -----------------------------
