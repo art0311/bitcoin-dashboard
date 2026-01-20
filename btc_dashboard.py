@@ -438,10 +438,6 @@ if has_data(btc, ["Close"]):
         pivot_eps=0.002
     )
 
-st.caption(f"S/R debug — n={len(btc)}, window={sr_window}, levels={len(levels)}")
-
-
-
 
 
 # -----------------------------
@@ -483,6 +479,8 @@ else:
 # Price + Overlays (SMA Long slope coloring)
 # -----------------------------
 st.subheader("📈 Price + Indicators")
+
+st.caption(f"S/R debug — n={len(btc)}, window={sr_window}, levels={len(levels)}")
 
 if has_data(btc, ["Close"]):
     fig, ax = plt.subplots(figsize=(12, 5))
