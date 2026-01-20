@@ -391,7 +391,17 @@ def detect_levels(series, window=20, tolerance=0.015):
                 clustered.append(lvl)
     return clustered
 
-levels = detect_levels(btc["Close"]) if has_data(btc, ["Close"]) else []
+# Adaptive support/resistance window
+if has_data(btc, ["Close"]):
+    sr_window = max(5, min(20, len(btc) // 3))
+    levels = detect_levels(
+        btc["Close"],
+        window=sr_window,
+        tolerance=0.015
+    )
+else:
+    levels = []
+
 
 # -----------------------------
 # Header + Top Metrics (now includes Score + Distance)
