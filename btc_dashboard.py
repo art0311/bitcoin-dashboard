@@ -124,12 +124,11 @@ def market_strength_score(btc: pd.DataFrame):
 # Spot BTC ETF Daily Net Flow (US$mm) - robust (no read_html)
 # -----------------------------
 @st.cache_data(ttl=900)
-def fetch_spot_btc_etf_flow_usdm():
+def fetch_spot_btc_etf_flow_usdm_debug():
     """
-    Returns latest daily net flow for US spot BTC ETFs in USD millions (float).
-    Uses DefiLlama mirror first for Streamlit Cloud stability.
+    Returns (flow_usdm, debug_dict)
+    flow_usdm: float USD millions, or None
     """
-
     urls = [
         "https://defillama2.llamao.fi/etfs",
         "https://defillama.com/etfs",
@@ -141,36 +140,66 @@ def fetch_spot_btc_etf_flow_usdm():
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    pattern = (
-        r"Bitcoin[\s\S]{0,1200}?"
-        r"Flows[^0-9\-+]*"
-        r"([+-])?\$?\s*"
-        r"([0-9][0-9,\.]*)\s*"
-        r"([mMbB])"
-    )
+    # Handles: Flows-$394.7m, Flows$4.7m, Flows: -$394.7m, etc.
+    patterns = [
+        r"Bitcoin[\s\S]{0,2500}?Flows\s*-?\s*:?\s*\$?\s*([+-])?\s*([0-9][0-9,\.]*)\s*([mMbB])",
+        r"Flows\s*-?\s*:?\s*\$?\s*([+-])?\s*([0-9][0-9,\.]*)\s*([mMbB])",
+    ]
+
+    debug = {"tried": []}
 
     for url in urls:
+        entry = {"url": url}
         try:
             r = requests.get(url, headers=headers, timeout=15)
-            if r.status_code != 200:
-                continue
+            entry["status"] = r.status_code
+            entry["len"] = len(r.text or "")
+            html = r.text or ""
 
-            html = r.text
-            match = re.search(pattern, html, flags=re.IGNORECASE)
+            entry["has_Bitcoin"] = ("Bitcoin" in html)
+            entry["has_Flows"] = ("Flows" in html)
+
+            # store a small snippet around first "Flows" if present
+            idx = html.lower().find("flows")
+            if idx != -1:
+                start = max(0, idx - 120)
+                end = min(len(html), idx + 200)
+                entry["flows_snippet"] = html[start:end]
+            else:
+                entry["flows_snippet"] = None
+
+            match = None
+            used = None
+            for p in patterns:
+                match = re.search(p, html, flags=re.IGNORECASE)
+                if match:
+                    used = p
+                    break
+
+            entry["matched"] = bool(match)
+            entry["pattern_used"] = used
+
+            debug["tried"].append(entry)
 
             if not match:
                 continue
 
-            sign = -1.0 if match.group(1) == "-" else 1.0
+            sign = -1.0 if (match.group(1) == "-") else 1.0
             num = float(match.group(2).replace(",", ""))
             unit = match.group(3).lower()
 
-            return sign * num * (1000.0 if unit == "b" else 1.0)
+            flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
+            debug["selected_url"] = url
+            debug["parsed_flow"] = flow_usdm
+            return flow_usdm, debug
 
-        except Exception:
+        except Exception as e:
+            entry["error"] = str(e)
+            debug["tried"].append(entry)
             continue
 
-    return None
+    return None, debug
+
 
 
 # -----------------------------
@@ -229,7 +258,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
 
-flow = fetch_spot_btc_etf_flow_usdm()
+flow, etf_debug = fetch_spot_btc_etf_flow_usdm_debug()
 
 # Store a small history in session_state so we can do 7-entry rolling trend
 # (persists while the app stays running)
