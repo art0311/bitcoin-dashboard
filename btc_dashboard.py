@@ -305,6 +305,8 @@ if len(hist) >= 7:
 else:
     st.sidebar.caption("7-entry trend: collecting data (need 7 refreshes).")
 
+with st.sidebar.expander("ETF debug (temporary)"):
+    st.write(etf_debug)
 
 # -----------------------------
 # Data Loader
