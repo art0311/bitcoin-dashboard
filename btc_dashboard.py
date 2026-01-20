@@ -416,20 +416,30 @@ def detect_levels(series, window=20, tolerance=0.015, pivot_eps=0.002):
 
 
 # Adaptive support/resistance window
+# Adaptive support/resistance window (works for 1mo AND long timelines)
 sr_window = None
 levels = []
 
 if has_data(btc, ["Close"]):
-    sr_window = max(3, min(12, len(btc) // 4))
+    n = len(btc)
+
+    # Scale window with dataset size:
+    # - small enough for 1mo (~20 rows)
+    # - larger for 1y+ so pivots are meaningful
+    sr_window = int(np.clip(n * 0.08, 5, 40))   # 8% of bars, min 5, max 40
+
+    # Tolerance can scale a bit too (longer timelines = slightly tighter clustering)
+    sr_tol = 0.02 if n < 60 else 0.015
+
     levels = detect_levels(
         btc["Close"],
         window=sr_window,
-        tolerance=0.015,
+        tolerance=sr_tol,
         pivot_eps=0.002
     )
 
-# Temporary debug (safe even if sr_window is None)
 st.caption(f"S/R debug — n={len(btc)}, window={sr_window}, levels={len(levels)}")
+
 
 
 
