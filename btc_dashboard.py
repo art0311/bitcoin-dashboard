@@ -127,20 +127,17 @@ def market_strength_score(btc: pd.DataFrame):
 def fetch_spot_btc_etf_flow_usdm():
     """
     Returns latest daily net flow for US spot BTC ETFs in USD millions (float).
-    Tries DefiLlama mirror first, then main site.
+    Uses DefiLlama mirror first for Streamlit Cloud stability.
     """
+
     urls = [
         "https://defillama2.llamao.fi/etfs",
         "https://defillama.com/etfs",
     ]
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html",
         "Accept-Language": "en-US,en;q=0.9",
     }
 
@@ -159,14 +156,14 @@ def fetch_spot_btc_etf_flow_usdm():
                 continue
 
             html = r.text
-            m = re.search(pattern, html, flags=re.IGNORECASE)
+            match = re.search(pattern, html, flags=re.IGNORECASE)
 
-            if not m:
+            if not match:
                 continue
 
-            sign = -1.0 if m.group(1) == "-" else 1.0
-            num = float(m.group(2).replace(",", ""))
-            unit = m.group(3).lower()
+            sign = -1.0 if match.group(1) == "-" else 1.0
+            num = float(match.group(2).replace(",", ""))
+            unit = match.group(3).lower()
 
             return sign * num * (1000.0 if unit == "b" else 1.0)
 
@@ -174,17 +171,6 @@ def fetch_spot_btc_etf_flow_usdm():
             continue
 
     return None
-
-        sign = -1.0 if (m.group(1) == "-") else 1.0
-        num = float(m.group(2).replace(",", ""))
-        unit = m.group(3).lower()
-
-        # Normalize to USD millions
-        flow_usdm = num * (1000.0 if unit == "b" else 1.0) * sign
-        return flow_usdm
-
-    except Exception:
-        return None
 
 
 # -----------------------------
