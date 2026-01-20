@@ -371,36 +371,57 @@ else:
 # -----------------------------
 # Support & Resistance
 # -----------------------------
-def detect_levels(series, window=20, tolerance=0.015):
-    prices = series.to_numpy(dtype=float)
-    if len(prices) < (2 * window + 1):
+def detect_levels(series, window=20, tolerance=0.015, pivot_eps=0.002):
+    """
+    Robust S/R detection:
+    - Works on short ranges like 1mo
+    - Uses a centered window (includes i+window)
+    - Uses epsilon tolerance so we don't require exact equality
+    """
+    prices = pd.Series(series).dropna().to_numpy(dtype=float)
+    n = len(prices)
+    if n < (2 * window + 1):
         return []
-    levels = []
-    for i in range(window, len(prices) - window):
-        seg = prices[i-window:i+window]
+
+    raw_levels = []
+    for i in range(window, n - window):
+        seg = prices[i - window : i + window + 1]  # +1 includes right side
         cur = prices[i]
-        if cur == np.min(seg) or cur == np.max(seg):
-            levels.append(cur)
-    levels = sorted(levels)
+        seg_min = float(np.min(seg))
+        seg_max = float(np.max(seg))
+
+        # "Near-min" or "near-max" instead of exact equality
+        is_support = cur <= seg_min * (1 + pivot_eps)
+        is_resist  = cur >= seg_max * (1 - pivot_eps)
+
+        if is_support or is_resist:
+            raw_levels.append(cur)
+
+    if not raw_levels:
+        return []
+
+    raw_levels = sorted(raw_levels)
+
+    # Cluster close-by levels together
     clustered = []
-    for lvl in levels:
+    for lvl in raw_levels:
         if not clustered:
             clustered.append(lvl)
         else:
-            if abs(lvl - clustered[-1]) / max(clustered[-1], 1e-9) > tolerance:
+            if abs(lvl - clustered[-1]) / max(abs(clustered[-1]), 1e-9) > tolerance:
                 clustered.append(lvl)
+
     return clustered
+
 
 # Adaptive support/resistance window
 if has_data(btc, ["Close"]):
-    sr_window = max(5, min(20, len(btc) // 3))
-    levels = detect_levels(
-        btc["Close"],
-        window=sr_window,
-        tolerance=0.015
-    )
+    # smaller window helps 1mo (usually ~20-23 points)
+    sr_window = max(3, min(12, len(btc) // 4))
+    levels = detect_levels(btc["Close"], window=sr_window, tolerance=0.015, pivot_eps=0.002)
 else:
     levels = []
+
 
 
 # -----------------------------
