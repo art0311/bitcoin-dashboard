@@ -414,8 +414,6 @@ def detect_levels(series, window=20, tolerance=0.015, pivot_eps=0.002):
     return clustered
 
 
-
-# Adaptive support/resistance window
 # Adaptive support/resistance window (works for 1mo AND long timelines)
 sr_window = None
 levels = []
@@ -505,8 +503,37 @@ if has_data(btc, ["Close"]):
     ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
     ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
 
-    for lvl in levels[-8:]:
-        ax.axhline(lvl, linestyle="--", alpha=0.35)
+# -----------------------------
+# Support / Resistance lines + labels
+# -----------------------------
+for lvl in levels[-8:]:
+
+    # horizontal line
+    ax.axhline(
+        lvl,
+        linestyle="--",
+        linewidth=1.4,
+        alpha=0.75,
+        color="steelblue"
+    )
+
+    # price label on right edge
+    ax.text(
+        btc.index[-1],      # far right of chart
+        lvl,
+        f"{lvl:,.0f}",
+        va="center",
+        ha="left",
+        fontsize=9,
+        color="steelblue",
+        bbox=dict(
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.75,
+            pad=2
+        )
+    )
+
 
     ax.set_ylabel("USD")
     ax.legend()
