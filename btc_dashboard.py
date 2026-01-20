@@ -220,7 +220,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
 
-flow, etf_debug = fetch_spot_btc_etf_flow_usdm_debug()
+flow = fetch_spot_btc_etf_flow_usdm()
 
 # Store a small history in session_state so we can do 7-entry rolling trend
 # (persists while the app stays running)
@@ -267,8 +267,7 @@ if len(hist) >= 7:
 else:
     st.sidebar.caption("7-entry trend: collecting data (need 7 refreshes).")
 
-with st.sidebar.expander("ETF debug (temporary)"):
-    st.write(etf_debug)
+
 
 # -----------------------------
 # Data Loader
