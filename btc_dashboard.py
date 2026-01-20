@@ -124,15 +124,8 @@ def market_strength_score(btc: pd.DataFrame):
 # Spot BTC ETF Daily Net Flow (US$mm) - robust (no read_html)
 # -----------------------------
 @st.cache_data(ttl=900)
-def fetch_spot_btc_etf_flow_usdm_debug():
-    """
-    Returns (flow_usdm, debug_dict)
-    flow_usdm: float USD millions, or None
-    """
-    urls = [
-        "https://defillama2.llamao.fi/etfs",
-        "https://defillama.com/etfs",
-    ]
+def fetch_spot_btc_etf_flow_usdm():
+    url = "https://defillama2.llamao.fi/etfs"
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -140,65 +133,34 @@ def fetch_spot_btc_etf_flow_usdm_debug():
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    # Handles: Flows-$394.7m, Flows$4.7m, Flows: -$394.7m, etc.
-    patterns = [
-        r"Bitcoin[\s\S]{0,2500}?Flows\s*-?\s*:?\s*\$?\s*([+-])?\s*([0-9][0-9,\.]*)\s*([mMbB])",
-        r"Flows\s*-?\s*:?\s*\$?\s*([+-])?\s*([0-9][0-9,\.]*)\s*([mMbB])",
-    ]
+    # Matches: Flows ... -$394.7m  OR  Flows ... $394.7m
+    pattern = r"Flows[\s\S]{0,200}([+-])?\s*(-?\$?\s*[0-9][0-9,\.]*)\s*([mMbB])"
 
-    debug = {"tried": []}
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        html = r.text
 
-    for url in urls:
-        entry = {"url": url}
-        try:
-            r = requests.get(url, headers=headers, timeout=15)
-            entry["status"] = r.status_code
-            entry["len"] = len(r.text or "")
-            html = r.text or ""
+        match = re.search(pattern, html, flags=re.IGNORECASE)
+        if not match:
+            return None
 
-            entry["has_Bitcoin"] = ("Bitcoin" in html)
-            entry["has_Flows"] = ("Flows" in html)
+        raw = match.group(2).replace(",", "").replace("$", "").strip()
+        num = float(raw)
 
-            # store a small snippet around first "Flows" if present
-            idx = html.lower().find("flows")
-            if idx != -1:
-                start = max(0, idx - 120)
-                end = min(len(html), idx + 200)
-                entry["flows_snippet"] = html[start:end]
-            else:
-                entry["flows_snippet"] = None
+        # If the number already has a negative sign, keep it.
+        if num < 0:
+            flow = num
+        else:
+            sign = -1.0 if match.group(1) == "-" else 1.0
+            flow = sign * num
 
-            match = None
-            used = None
-            for p in patterns:
-                match = re.search(p, html, flags=re.IGNORECASE)
-                if match:
-                    used = p
-                    break
+        unit = match.group(3).lower()
+        return flow * (1000.0 if unit == "b" else 1.0)
 
-            entry["matched"] = bool(match)
-            entry["pattern_used"] = used
+    except Exception:
+        return None
 
-            debug["tried"].append(entry)
-
-            if not match:
-                continue
-
-            sign = -1.0 if (match.group(1) == "-") else 1.0
-            num = float(match.group(2).replace(",", ""))
-            unit = match.group(3).lower()
-
-            flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
-            debug["selected_url"] = url
-            debug["parsed_flow"] = flow_usdm
-            return flow_usdm, debug
-
-        except Exception as e:
-            entry["error"] = str(e)
-            debug["tried"].append(entry)
-            continue
-
-    return None, debug
 
 
 
