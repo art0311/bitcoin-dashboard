@@ -418,7 +418,7 @@ def detect_levels(series, window=20, tolerance=0.015, pivot_eps=0.002):
 if has_data(btc, ["Close"]):
     # smaller window helps 1mo (usually ~20-23 points)
     sr_window = max(3, min(12, len(btc) // 4))
-    levels = detect_levels(btc["Close"], window=sr_window, tolerance=0.015, pivot_eps=0.003)
+    levels = detect_levels(btc["Close"], window=sr_window, tolerance=0.015, pivot_eps=0.005)
 else:
     levels = []
 
