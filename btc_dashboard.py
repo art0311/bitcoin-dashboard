@@ -591,7 +591,13 @@ else:
 # -----------------------------
 # RSI
 # -----------------------------
-st.subheader("📉 RSI")
+st.subheader("📉 RSI (Relative Strength Index)")
+st.caption(
+    "Measures how fast and how far price has moved recently. "
+    "Values above 70 suggest the asset may be overbought, "
+    "while values below 30 suggest it may be oversold."
+)
+
 if has_data(btc, ["RSI"]) and btc["RSI"].notna().sum() >= 2:
     figr, axr = plt.subplots(figsize=(12, 3))
     axr.plot(btc.index, btc["RSI"])
@@ -606,7 +612,13 @@ else:
 # -----------------------------
 # OBV
 # -----------------------------
-st.subheader("💰 OBV")
+st.subheader("💰 OBV (On-Balance Volume)")
+st.caption(
+    "Tracks whether volume is flowing into or out of the asset. "
+    "Rising OBV suggests buyers are in control, "
+    "while falling OBV indicates selling pressure."
+)
+
 if has_data(btc, ["OBV"]) and btc["OBV"].notna().sum() >= 2:
     figo, axo = plt.subplots(figsize=(12, 3))
     axo.plot(btc.index, btc["OBV"])
@@ -618,7 +630,13 @@ else:
 # -----------------------------
 # MACD
 # -----------------------------
-st.subheader("📊 MACD")
+st.subheader("📊 MACD (Moving Average Convergence Divergence)")
+st.caption(
+    "Shows trend direction and momentum by comparing two moving averages. "
+    "When MACD crosses above its signal line, momentum is turning bullish; "
+    "a cross below suggests weakening or bearish momentum."
+)
+
 if has_data(btc, ["MACD", "MACD_Signal", "MACD_Hist"]) and btc["MACD"].notna().sum() >= 2:
     figm, axm = plt.subplots(figsize=(12, 3))
     axm.plot(btc.index, btc["MACD"], label="MACD")
