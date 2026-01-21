@@ -655,75 +655,68 @@ else:
     st.info("Not enough data for MACD.")
 
 # -----------------------------
-# AI Forecasts
+# AI Forecasts (adaptive per timeframe)
 # -----------------------------
 st.subheader("🤖 AI Forecasts")
 
-if has_data(btc, ["Close"]) and len(btc) > 100:
-
+if has_data(btc, ["Close"]) and len(btc) >= 25:  # 1mo will pass now
     df = btc[["Close"]].dropna().copy()
     df["t"] = np.arange(len(df))
 
     X = df[["t"]]
     y = df["Close"]
 
+    # --- Determine forecast spacing + steps ---
+    if period == "1d":
+        freq = "5min"
+        steps = int(predict_days * 24 * 60 / 5)     # days -> 5m bars
+    elif period == "7d":
+        freq = "15min"
+        steps = int(predict_days * 24 * 60 / 15)    # days -> 15m bars
+    else:
+        freq = "1D"
+        steps = int(predict_days)                   # already in days
+
+    # Guardrail
+    steps = max(5, min(steps, 2000))
+
+    # --- Fit models ---
     lr = LinearRegression().fit(X, y)
     rf = RandomForestRegressor(n_estimators=200, random_state=42).fit(X, y)
 
-    future_t = np.arange(
-        len(df),
-        len(df) + predict_steps
-    ).reshape(-1, 1)
-
+    future_t = np.arange(len(df), len(df) + steps).reshape(-1, 1)
     lr_pred = lr.predict(future_t)
     rf_pred = rf.predict(future_t)
 
-    # Match forecast spacing to chart timeframe
-    if period == "1d":
-        freq = "5min"
-    elif period == "7d":
-        freq = "15min"
-    else:
-        freq = "1D"
+    future_dates = pd.date_range(df.index[-1], periods=steps + 1, freq=freq)[1:]
 
-    future_dates = pd.date_range(
-        df.index[-1],
-        periods=predict_steps + 1,
-        freq=freq
-    )[1:]
-
-    # Confidence band
+    # --- Confidence band (based on LR residuals) ---
     residuals = y - lr.predict(X)
-    std = np.std(residuals)
-
+    std = float(np.std(residuals)) if len(residuals) > 3 else 0.0
     upper = lr_pred + std
     lower = lr_pred - std
 
+    # --- Plot ---
     figa, axa = plt.subplots(figsize=(12, 4))
-
     axa.plot(df.index, df["Close"], label="Historical", linewidth=2)
     axa.plot(future_dates, lr_pred, label="Linear Regression")
     axa.plot(future_dates, rf_pred, label="Random Forest")
 
-    axa.fill_between(
-        future_dates,
-        lower,
-        upper,
-        alpha=0.15,
-        label="Confidence Range"
-    )
+    if std > 0:
+        axa.fill_between(future_dates, lower, upper, alpha=0.15, label="Confidence Range")
 
     axa.legend()
     st.pyplot(figa)
 
+    # Helpful caption so it “makes sense”
     st.caption(
-        "Forecast projects short-term price direction using recent data. "
-        "Flat projections indicate weak trend strength. "
-        "Best used alongside market regime and ETF flows."
+        f"Forecast horizon: {predict_days} day(s). "
+        f"Using {'intraday bars' if period in ['1d','7d'] else 'daily bars'} "
+        f"({steps} prediction steps)."
     )
-
 else:
-    st.info("Not enough data for AI predictions yet.")
+    st.info("Not enough data for AI predictions yet (need ~25+ points).")
+
 
 
 
