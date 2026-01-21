@@ -699,12 +699,12 @@ hint_headline, hint_bullets, hint_badge = action_hint(
 
 
     # Match spacing to selected timeframe
-    if period == "1d":
-        freq = "5min"
-    elif period == "7d":
-        freq = "15min"
-    else:
-        freq = "1D"
+if period == "1d":
+    freq = "5min"
+elif period == "7d":
+    freq = "15min"
+else:
+    freq = "1D"
 
     future_dates = pd.date_range(df.index[-1], periods=steps + 1, freq=freq)[1:]
 
