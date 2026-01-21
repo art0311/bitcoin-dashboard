@@ -687,6 +687,17 @@ if has_data(btc, ["Close"]) and len(btc) >= 25:
     lr_pred = lr.predict(future_t)
     rf_pred = rf.predict(future_t)
 
+    # Make sure these exist: regime (string), flow (float or None), dist (float or None)
+hint_headline, hint_bullets, hint_badge = action_hint(
+    bias_score=bias_score,
+    conf_score=conf_score,
+    agree=agree,
+    regime=regime if 'regime' in locals() else "Unknown",
+    flow=flow if 'flow' in locals() else None,
+    dist_pct=dist if 'dist' in locals() else None
+)
+
+
     # Match spacing to selected timeframe
     if period == "1d":
         freq = "5min"
@@ -766,6 +777,84 @@ if has_data(btc, ["Close"]) and len(btc) >= 25:
     else:
         conf_label = f"Low ({conf_score:.0f}%)"
         conf_emoji = "🔴"
+def action_hint(bias_score, conf_score, agree, regime, flow, dist_pct):
+    """
+    Returns (headline, bullets[list], badge_emoji).
+    Educational guidance only (not financial advice).
+    """
+    # classify
+    if bias_score >= 60:
+        bias = "bull"
+    elif bias_score <= 40:
+        bias = "bear"
+    else:
+        bias = "neutral"
+
+    conf = "high" if conf_score >= 70 else ("med" if conf_score >= 45 else "low")
+
+    etf = None
+    if flow is not None and np.isfinite(flow):
+        etf = "in" if flow > 0 else ("out" if flow < 0 else "flat")
+
+    # Default
+    headline = "🧭 Action hint: Wait for clearer confirmation."
+    badge = "🟡"
+    bullets = [
+        "Signals are mixed. Use support/resistance and wait for a clean break or bounce.",
+        "Consider smaller position size (or paper trade) until confidence improves."
+    ]
+
+    # Trend-following setup (best case)
+    if bias == "bull" and conf == "high" and agree and regime == "Bull":
+        badge = "🟢"
+        headline = "🧭 Action hint: Trend-following environment (bullish)."
+        bullets = [
+            "Prefer buy-the-dip setups near support or the SMA Long; avoid chasing spikes.",
+            "If price holds above the nearest support and AI stays bullish, trend continuation is more likely.",
+            "Use the nearest resistance (R1) as a first target/decision point."
+        ]
+        if etf == "in":
+            bullets.append("ETF flows are positive: institutional demand supports the uptrend.")
+        elif etf == "out":
+            bullets.append("ETF flows are negative: be more selective (expect pullbacks).")
+
+    # Bear trend-following setup
+    elif bias == "bear" and conf == "high" and agree and regime == "Bear":
+        badge = "🔴"
+        headline = "🧭 Action hint: Downtrend environment (bearish)."
+        bullets = [
+            "Avoid adding risk on rallies; rallies often retrace back down in strong downtrends.",
+            "Look for lower highs near resistance; treat support breaks as risk warnings.",
+            "If price is below SMA Long and AI stays bearish, downside continuation is more likely."
+        ]
+        if etf == "out":
+            bullets.append("ETF flows are negative: distribution pressure can amplify downside moves.")
+        elif etf == "in":
+            bullets.append("ETF flows are positive: this may be a counter-trend bounce risk—be cautious.")
+
+    # Range / chop setup
+    elif regime == "Range / Transition" or (conf == "low") or (not agree):
+        badge = "🟡"
+        headline = "🧭 Action hint: Choppy/range conditions—focus on risk control."
+        bullets = [
+            "In chop, indicators whipsaw—signals flip quickly. Smaller size and tighter risk limits help.",
+            "Use support as a bounce zone and resistance as a fade zone; avoid mid-range entries.",
+            "Wait for confirmation: a break + hold above resistance (bull) or below support (bear)."
+        ]
+        if etf == "in":
+            bullets.append("ETF flows are positive: chop could resolve upward, but wait for breakout confirmation.")
+        elif etf == "out":
+            bullets.append("ETF flows are negative: chop could resolve downward, but wait for breakdown confirmation.")
+
+    # Mixed: bullish long-term, bearish short-term idea via dist
+    # (dist_pct positive and large means extended above SMA long; negative means below)
+    if dist_pct is not None and np.isfinite(dist_pct):
+        if bias == "bull" and dist_pct > 8:
+            bullets.append("Price is extended above SMA Long: consider waiting for a pullback rather than buying immediately.")
+        if bias == "bear" and dist_pct < -8:
+            bullets.append("Price is far below SMA Long: downside may be crowded—watch for sharp bounces near support.")
+
+    return headline, bullets, badge
 
     # Expected range (next N steps):
     # Use confidence band AND a simple ATR-style estimate when High/Low available
@@ -785,29 +874,48 @@ if has_data(btc, ["Close"]) and len(btc) >= 25:
             exp_low = float(min(exp_low, last_price - band)) if np.isfinite(exp_low) else float(last_price - band)
             exp_high = float(max(exp_high, last_price + band)) if np.isfinite(exp_high) else float(last_price + band)
 
-    # -----------------------------
-    # Render summary panel
-    # -----------------------------
-    with st.expander("📌 AI Forecast Summary (how to read this)", expanded=True):
-        c1, c2, c3, c4 = st.columns(4)
+# -----------------------------
+# Render summary panel
+# -----------------------------
+with st.expander("📌 AI Forecast Summary (how to read this)", expanded=True):
 
-        c1.metric("Bias", bias_label)
-        c2.metric("Confidence", f"{conf_emoji} {conf_label}")
-        c3.metric("Model Agreement", agreement_label)
-        c4.metric("Horizon", f"{steps} steps ({freq})")
+    c1, c2, c3, c4 = st.columns(4)
 
-        if np.isfinite(exp_low) and np.isfinite(exp_high):
-            st.markdown(
-                f"**Expected range (next {steps} steps):** "
-                f"Low **${exp_low:,.0f}**  •  High **${exp_high:,.0f}**"
-            )
-        else:
-            st.caption("Expected range unavailable (not enough volatility history).")
+    c1.metric("Bias", bias_label)
+    c2.metric("Confidence", f"{conf_emoji} {conf_label}")
+    c3.metric("Model Agreement", agreement_label)
+    c4.metric("Horizon", f"{steps} steps ({freq})")
 
-        st.caption(
-            "Tip: **Bias** is directional drift. **Confidence** drops in choppy/high-vol markets or when models disagree. "
-            "Use this alongside Market Regime, ETF flows, and S/R—never as a standalone signal."
+    if np.isfinite(exp_low) and np.isfinite(exp_high):
+        st.markdown(
+            f"**Expected range (next {steps} steps):** "
+            f"Low **${exp_low:,.0f}**  •  High **${exp_high:,.0f}**"
         )
+    else:
+        st.caption("Expected range unavailable (not enough volatility history).")
+
+    st.caption(
+        "Tip: **Bias** is directional drift. "
+        "**Confidence** drops in choppy/high-vol markets or when models disagree. "
+        "Use this alongside Market Regime, ETF flows, and S/R—never as a standalone signal."
+    )
+
+    st.markdown("---")
+
+    # ===============================
+    # ✅ ACTION HINT DISPLAY
+    # ===============================
+    st.markdown(f"### {hint_badge} Action Hint")
+
+    st.markdown(f"**{hint_headline}**")
+
+    for bullet in hint_bullets:
+        st.markdown(f"- {bullet}")
+
+    st.caption(
+        "Educational guidance only — not financial advice. "
+        "Use alongside market regime, ETF flows, and support/resistance."
+    )
 
     # -----------------------------
     # Plot forecast
