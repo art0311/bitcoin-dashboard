@@ -124,17 +124,13 @@ def market_strength_score(btc: pd.DataFrame):
 # Spot BTC ETF Daily Net Flow (US$mm) - robust (no read_html)
 # -----------------------------
 @st.cache_data(ttl=900)
-def fetch_spot_etf_flow_usdm(asset_label: str):
+def fetch_spot_etf_flow_usdm_debug(asset_label: str):
     """
-    Returns latest daily net flow for US spot crypto ETFs in USD millions (float).
-    Supports: "Bitcoin", "Ethereum"
-    Source: DefiLlama (flows attributed to Farside on the page).
+    Returns (flow_usdm, debug_dict)
+    flow_usdm = float in USD millions (e.g., 3000.0 means $3.0B)
     """
-    if asset_label not in ("Bitcoin", "Ethereum"):
-        return None
-
     urls = [
-        "https://defillama2.llamao.fi/etfs",  # mirror works on Streamlit Cloud
+        "https://defillama2.llamao.fi/etfs",  # mirror (usually works on Streamlit Cloud)
         "https://defillama.com/etfs",
     ]
 
@@ -144,67 +140,93 @@ def fetch_spot_etf_flow_usdm(asset_label: str):
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    # Example snippets:
-    # Bitcoin ... Flows -$394.7m
-    # Ethereum ... Flows $2.91b
-    pattern = (
-        rf"{asset_label}[\s\S]{{0,2500}}?"
-        r"Flows[^0-9\-+]*"
-        r"([+-])?\$?\s*"
-        r"([0-9][0-9,\.]*)\s*"
-        r"([mMbB])"
+    dbg = {"asset": asset_label, "tried": []}
+
+    if asset_label not in ("Bitcoin", "Ethereum"):
+        dbg["error"] = "asset_label must be 'Bitcoin' or 'Ethereum'"
+        return None, dbg
+
+    # Find asset section, then find Flows value near it
+    value_pat = re.compile(
+        r"Flows[\s\S]{0,250}?([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
+        re.IGNORECASE
     )
 
     for url in urls:
+        info = {"url": url, "status": None, "len": None, "matched": False, "flows_snippet": None}
         try:
             r = requests.get(url, headers=headers, timeout=15)
+            info["status"] = r.status_code
+            html = r.text or ""
+            info["len"] = len(html)
+
             if r.status_code != 200:
+                dbg["tried"].append(info)
                 continue
 
-            html = r.text
-            m = re.search(pattern, html, flags=re.IGNORECASE)
+            idx = html.lower().find(asset_label.lower())
+            if idx == -1:
+                dbg["tried"].append(info)
+                continue
+
+            window = html[idx: idx + 8000]  # big enough window
+            fidx = window.lower().find("flows")
+            if fidx != -1:
+                info["flows_snippet"] = window[max(0, fidx - 150): fidx + 220]
+
+            m = value_pat.search(window)
             if not m:
+                dbg["tried"].append(info)
                 continue
 
             sign = -1.0 if (m.group(1) == "-") else 1.0
             num = float(m.group(2).replace(",", ""))
             unit = m.group(3).lower()
 
-            # normalize to USD millions
-            return sign * num * (1000.0 if unit == "b" else 1.0)
+            flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
 
-        except Exception:
+            info["matched"] = True
+            dbg["tried"].append(info)
+            return flow_usdm, dbg
+
+        except Exception as e:
+            info["error"] = str(e)
+            dbg["tried"].append(info)
             continue
 
-    return None
+    return None, dbg
+
 
 
 
 # -----------------------------
 # Sidebar
 # -----------------------------
-st.sidebar.title("⚙️ Settings")
-symbol = st.sidebar.selectbox("Asset", ["BTC-USD", "ETH-USD"], index=0)
+st.sidebar.markdown("---")
+st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
-# Asset labels
-ASSET_TICKER = symbol.replace("-USD", "")
-ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else ("Ethereum" if symbol == "ETH-USD" else ASSET_TICKER)
-ETF_ASSET_LABEL = "Bitcoin" if symbol == "BTC-USD" else ("Ethereum" if symbol == "ETH-USD" else None)
+flow, etf_debug = fetch_spot_etf_flow_usdm_debug(ETF_ASSET_LABEL)
 
-period = st.sidebar.selectbox(
-    "Time Range",
-    ["1d", "7d", "1mo", "1y", "2y", "5y", "max"],
-    index=3
-)
+# Debug expander (super important)
+with st.sidebar.expander("ETF debug", expanded=False):
+    st.write(etf_debug)
 
-predict_steps = st.sidebar.slider(
-    "Prediction Steps (future candles)",
-    min_value=10,
-    max_value=200,
-    value=60,
-    step=5
-)
+if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
+    st.sidebar.info("ETF flow data unavailable.")
+else:
+    label = (
+        "🟢 Net Inflow" if flow > 0 else
+        "🔴 Net Outflow" if flow < 0 else
+        "🟡 Flat"
+    )
 
+    st.sidebar.metric(
+        "Latest Daily ETF Flow",
+        f"{flow:,.1f} US$mm",
+        label
+    )
+
+    st.sidebar.caption("Source: DefiLlama (flows attributed to Farside)")
 
 
 
@@ -248,7 +270,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
-flow = fetch_spot_etf_flow_usdm(ETF_ASSET_LABEL) if ETF_ASSET_LABEL else None
+flow, etf_debug = fetch_spot_etf_flow_usdm_debug(ETF_ASSET_LABEL)
 
 # Store a small history in session_state so we can do 7-entry rolling trend
 # (persists while the app stays running)
