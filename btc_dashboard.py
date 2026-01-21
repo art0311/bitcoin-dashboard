@@ -176,7 +176,14 @@ period = st.sidebar.selectbox(
     index=3
 )
 
-predict_days = st.sidebar.slider("Prediction Days", 7, 90, 30)
+predict_steps = st.sidebar.slider(
+    "Prediction Steps (future candles)",
+    min_value=10,
+    max_value=200,
+    value=60,
+    step=5
+)
+
 
 
 
@@ -661,11 +668,32 @@ if has_data(btc, ["Close"]) and len(btc) > 100:
     lr = LinearRegression().fit(X, y)
     rf = RandomForestRegressor(n_estimators=200, random_state=42).fit(X, y)
 
-    future_t = np.arange(len(df), len(df) + predict_days).reshape(-1, 1)
+    future_t = np.arange(len(df), len(df) + predict_steps).reshape(-1, 1)
     lr_pred = lr.predict(future_t)
     rf_pred = rf.predict(future_t)
 
-    future_dates = pd.date_range(df.index[-1], periods=predict_days + 1, freq="D")[1:]
+    # Match candle interval
+if period == "1d":
+    freq = "5min"
+elif period == "7d":
+    freq = "15min"
+else:
+    freq = "1D"
+
+# Match forecast spacing to chart timeframe
+if period == "1d":
+    freq = "5min"
+elif period == "7d":
+    freq = "15min"
+else:
+    freq = "1D"
+
+future_dates = pd.date_range(
+    df.index[-1],
+    periods=predict_steps + 1,
+    freq=freq
+)[1:]
+
 
     figa, axa = plt.subplots(figsize=(12, 4))
     axa.plot(df.index, df["Close"], label="Historical")
