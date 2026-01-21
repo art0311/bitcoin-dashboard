@@ -206,7 +206,6 @@ st.sidebar.title("⚙️ Settings")
 
 symbol = st.sidebar.selectbox("Asset", ["BTC-USD", "ETH-USD"], index=0)
 
-btc = load_data(symbol, period)
 
 ASSET_TICKER = symbol.replace("-USD", "")
 ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else "Ethereum"
@@ -238,7 +237,7 @@ else:
 
     st.sidebar.caption("Source: DefiLlama (flows attributed to Farside)")
 
-
+btc = load_data(symbol, period)
 
 # -----------------------------
 # Fear & Greed (Sidebar Gauge)
