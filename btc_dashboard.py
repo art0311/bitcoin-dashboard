@@ -211,6 +211,9 @@ ASSET_TICKER = symbol.replace("-USD", "")
 ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else "Ethereum"
 ETF_ASSET_LABEL = ASSET_NAME
 
+st.sidebar.caption("✅ Sidebar reached (after asset selection)")
+
+
 period = st.sidebar.selectbox(
     "Time Range",
     ["1d", "7d", "1mo", "1y", "2y", "5y", "max"],
@@ -267,51 +270,39 @@ st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
 flow, etf_debug = fetch_spot_etf_flow_usdm_debug(ETF_ASSET_LABEL)
 
-# Store a small history in session_state so we can do 7-entry rolling trend
-# (persists while the app stays running)
+# Always show debug (for now)
+st.sidebar.caption("ETF debug (collapsed)")
+with st.sidebar.expander("ETF debug", expanded=False):
+    st.write(etf_debug)
+
+# History per asset
 hist_key = f"etf_flow_hist_{ASSET_TICKER}"
 if hist_key not in st.session_state:
     st.session_state[hist_key] = []
 
-# Update history if we got a valid number
+# Update history when we have data
 if flow is not None and np.isfinite(flow):
     hist = st.session_state[hist_key]
-    # prevent duplicate repeats on reruns if the value hasn't changed
     if not hist or hist[-1] != float(flow):
         hist.append(float(flow))
-    # keep last 30 values
     st.session_state[hist_key] = hist[-30:]
 
+# Display result
 if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
     st.sidebar.info("ETF flow data unavailable.")
 else:
     label = "🟢 Net Inflow" if flow > 0 else ("🔴 Net Outflow" if flow < 0 else "🟡 Flat")
     st.sidebar.metric("Latest Daily ETF Flow", f"{flow:,.1f} US$mm", label)
-    st.sidebar.caption("Source: DefiLlama (flows attributed to Farside on page)")
+    st.sidebar.caption("Source: DefiLlama mirror (flows attributed to Farside)")
 
-# --- 7-entry rolling trend label (based on stored history) ---
+# 7-entry rolling trend (only if we have history)
 hist = st.session_state.get(hist_key, [])
 if len(hist) >= 7:
     last7_sum = float(np.sum(hist[-7:]))
     st.sidebar.metric("7-entry rolling net flow", f"{last7_sum:,.1f} US$mm")
-
-    if len(hist) >= 14:
-        prev7_sum = float(np.sum(hist[-14:-7]))
-        delta = last7_sum - prev7_sum
-
-        rel = abs(delta) / max(abs(prev7_sum), 1e-9)
-        if abs(delta) < 50 and rel < 0.25:
-            trend = "🟡 Flat / Mixed"
-        elif delta > 0:
-            trend = "🟢 Rising (more inflow)"
-        else:
-            trend = "🔴 Falling (more outflow)"
-
-        st.sidebar.metric("7-entry trend", trend, f"Δ vs prior 7: {delta:+,.1f} US$mm")
-    else:
-        st.sidebar.caption("7-entry trend: Need 14 values for comparison.")
 else:
     st.sidebar.caption("7-entry trend: collecting data (need 7 refreshes).")
+
 
 
 
