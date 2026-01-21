@@ -356,7 +356,7 @@ def load_data(symbol, period):
     except Exception:
         return pd.DataFrame()
 
-btc = load_data(symbol, period)
+
 
 # -----------------------------
 # Indicators (INDEX-SAFE) + Adaptive SMA windows
