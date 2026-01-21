@@ -11,7 +11,7 @@ import re
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 
-st.set_page_config(page_title="Bitcoin Live Dashboard", layout="wide")
+st.set_page_config(page_title="Crypto Live Dashboard", layout="wide")
 
 # -----------------------------
 # Helpers
@@ -124,8 +124,19 @@ def market_strength_score(btc: pd.DataFrame):
 # Spot BTC ETF Daily Net Flow (US$mm) - robust (no read_html)
 # -----------------------------
 @st.cache_data(ttl=900)
-def fetch_spot_btc_etf_flow_usdm():
-    url = "https://defillama2.llamao.fi/etfs"
+def fetch_spot_etf_flow_usdm(asset_label: str):
+    """
+    Returns latest daily net flow for US spot crypto ETFs in USD millions (float).
+    Supports: "Bitcoin", "Ethereum"
+    Source: DefiLlama (flows attributed to Farside on the page).
+    """
+    if asset_label not in ("Bitcoin", "Ethereum"):
+        return None
+
+    urls = [
+        "https://defillama2.llamao.fi/etfs",  # mirror works on Streamlit Cloud
+        "https://defillama.com/etfs",
+    ]
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -133,34 +144,39 @@ def fetch_spot_btc_etf_flow_usdm():
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    # Matches: Flows ... -$394.7m  OR  Flows ... $394.7m
-    pattern = r"Flows[\s\S]{0,200}([+-])?\s*(-?\$?\s*[0-9][0-9,\.]*)\s*([mMbB])"
+    # Example snippets:
+    # Bitcoin ... Flows -$394.7m
+    # Ethereum ... Flows $2.91b
+    pattern = (
+        rf"{asset_label}[\s\S]{{0,2500}}?"
+        r"Flows[^0-9\-+]*"
+        r"([+-])?\$?\s*"
+        r"([0-9][0-9,\.]*)\s*"
+        r"([mMbB])"
+    )
 
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        r.raise_for_status()
-        html = r.text
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                continue
 
-        match = re.search(pattern, html, flags=re.IGNORECASE)
-        if not match:
-            return None
+            html = r.text
+            m = re.search(pattern, html, flags=re.IGNORECASE)
+            if not m:
+                continue
 
-        raw = match.group(2).replace(",", "").replace("$", "").strip()
-        num = float(raw)
+            sign = -1.0 if (m.group(1) == "-") else 1.0
+            num = float(m.group(2).replace(",", ""))
+            unit = m.group(3).lower()
 
-        # If the number already has a negative sign, keep it.
-        if num < 0:
-            flow = num
-        else:
-            sign = -1.0 if match.group(1) == "-" else 1.0
-            flow = sign * num
+            # normalize to USD millions
+            return sign * num * (1000.0 if unit == "b" else 1.0)
 
-        unit = match.group(3).lower()
-        return flow * (1000.0 if unit == "b" else 1.0)
+        except Exception:
+            continue
 
-    except Exception:
-        return None
-
+    return None
 
 
 
@@ -168,7 +184,12 @@ def fetch_spot_btc_etf_flow_usdm():
 # Sidebar
 # -----------------------------
 st.sidebar.title("⚙️ Settings")
-symbol = st.sidebar.selectbox("Asset", ["BTC-USD"], index=0)
+symbol = st.sidebar.selectbox("Asset", ["BTC-USD", "ETH-USD"], index=0)
+
+# Asset labels
+ASSET_TICKER = symbol.replace("-USD", "")
+ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else ("Ethereum" if symbol == "ETH-USD" else ASSET_TICKER)
+ETF_ASSET_LABEL = "Bitcoin" if symbol == "BTC-USD" else ("Ethereum" if symbol == "ETH-USD" else None)
 
 period = st.sidebar.selectbox(
     "Time Range",
@@ -225,23 +246,24 @@ else:
     st.sidebar.info("Could not fetch sentiment data.")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🏦 Spot BTC ETF Flows (US$mm)")
+st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
-flow = fetch_spot_btc_etf_flow_usdm()
+flow = fetch_spot_etf_flow_usdm(ETF_ASSET_LABEL) if ETF_ASSET_LABEL else None
 
 # Store a small history in session_state so we can do 7-entry rolling trend
 # (persists while the app stays running)
-if "etf_flow_hist" not in st.session_state:
-    st.session_state.etf_flow_hist = []
+hist_key = f"etf_flow_hist_{ASSET_TICKER}"
+if hist_key not in st.session_state:
+    st.session_state[hist_key] = []
 
 # Update history if we got a valid number
 if flow is not None and np.isfinite(flow):
-    hist = st.session_state.etf_flow_hist
+    hist = st.session_state[hist_key]
     # prevent duplicate repeats on reruns if the value hasn't changed
     if not hist or hist[-1] != float(flow):
         hist.append(float(flow))
     # keep last 30 values
-    st.session_state.etf_flow_hist = hist[-30:]
+    st.session_state[hist_key] = hist[-30:]
 
 if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
     st.sidebar.info("ETF flow data unavailable.")
@@ -251,7 +273,7 @@ else:
     st.sidebar.caption("Source: DefiLlama (flows attributed to Farside on page)")
 
 # --- 7-entry rolling trend label (based on stored history) ---
-hist = st.session_state.get("etf_flow_hist", [])
+hist = st.session_state.get(hist_key, [])
 if len(hist) >= 7:
     last7_sum = float(np.sum(hist[-7:]))
     st.sidebar.metric("7-entry rolling net flow", f"{last7_sum:,.1f} US$mm")
@@ -434,7 +456,7 @@ if has_data(btc, ["Close"]):
 # -----------------------------
 # Header + Top Metrics (now includes Score + Distance)
 # -----------------------------
-st.title("📊 Bitcoin Live Dashboard")
+st.title(f"📊 {ASSET_NAME} Live Dashboard")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
 col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
@@ -444,7 +466,7 @@ if has_data(btc, ["Close"]) and len(btc) >= 2:
     prev = float(btc["Close"].iloc[-2])
     change = (price - prev) / prev * 100 if prev != 0 else 0.0
 
-    col1.metric("BTC Price", f"${price:,.0f}", f"{change:.2f}%")
+    col1.metric(f"{ASSET_TICKER} Price", f"${price:,.0f}", f"{change:.2f}%")
 
     s1 = safe_last(btc["SMA_short"])
     s2 = safe_last(btc["SMA_medium"])
