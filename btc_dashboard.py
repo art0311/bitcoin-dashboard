@@ -931,8 +931,8 @@ with st.expander("📌 AI Forecast Summary (how to read this)", expanded=True):
     axa.legend()
     st.pyplot(figa)
 
-else:
-    st.info("Not enough data for AI predictions yet (need ~25+ data points).")
+    else:
+        st.info("Not enough data for AI predictions yet (need ~25+ data points).")
 
 
 
