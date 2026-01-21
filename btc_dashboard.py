@@ -206,6 +206,8 @@ st.sidebar.title("⚙️ Settings")
 
 symbol = st.sidebar.selectbox("Asset", ["BTC-USD", "ETH-USD"], index=0)
 
+btc = load_data(symbol, period)
+
 ASSET_TICKER = symbol.replace("-USD", "")
 ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else "Ethereum"
 ETF_ASSET_LABEL = ASSET_NAME
@@ -355,7 +357,7 @@ def load_data(symbol, period):
     except Exception:
         return pd.DataFrame()
 
-btc = load_data(symbol, period)
+
 
 # -----------------------------
 # Indicators (INDEX-SAFE) + Adaptive SMA windows
