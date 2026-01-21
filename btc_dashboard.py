@@ -211,33 +211,19 @@ ASSET_TICKER = symbol.replace("-USD", "")
 ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else "Ethereum"
 ETF_ASSET_LABEL = ASSET_NAME
 
-st.sidebar.markdown("---")
-st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
+period = st.sidebar.selectbox(
+    "Time Range",
+    ["1d", "7d", "1mo", "1y", "2y", "5y", "max"],
+    index=3
+)
 
-flow, etf_debug = fetch_spot_etf_flow_usdm_debug(ETF_ASSET_LABEL)
-
-# Debug expander (super important)
-with st.sidebar.expander("ETF debug", expanded=False):
-    st.write(etf_debug)
-
-if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
-    st.sidebar.info("ETF flow data unavailable.")
-else:
-    label = (
-        "🟢 Net Inflow" if flow > 0 else
-        "🔴 Net Outflow" if flow < 0 else
-        "🟡 Flat"
-    )
-
-    st.sidebar.metric(
-        "Latest Daily ETF Flow",
-        f"{flow:,.1f} US$mm",
-        label
-    )
-
-    st.sidebar.caption("Source: DefiLlama (flows attributed to Farside)")
-
-
+predict_steps = st.sidebar.slider(
+    "Prediction Steps (future candles)",
+    min_value=10,
+    max_value=200,
+    value=60,
+    step=5
+)
 
 # -----------------------------
 # Fear & Greed (Sidebar Gauge)
