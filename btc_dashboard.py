@@ -658,7 +658,9 @@ else:
 # AI Forecasts
 # -----------------------------
 st.subheader("🤖 AI Forecasts")
+
 if has_data(btc, ["Close"]) and len(btc) > 100:
+
     df = btc[["Close"]].dropna().copy()
     df["t"] = np.arange(len(df))
 
@@ -668,40 +670,58 @@ if has_data(btc, ["Close"]) and len(btc) > 100:
     lr = LinearRegression().fit(X, y)
     rf = RandomForestRegressor(n_estimators=200, random_state=42).fit(X, y)
 
-    future_t = np.arange(len(df), len(df) + predict_steps).reshape(-1, 1)
+    future_t = np.arange(
+        len(df),
+        len(df) + predict_steps
+    ).reshape(-1, 1)
+
     lr_pred = lr.predict(future_t)
     rf_pred = rf.predict(future_t)
 
-    # Match candle interval
-if period == "1d":
-    freq = "5min"
-elif period == "7d":
-    freq = "15min"
-else:
-    freq = "1D"
+    # Match forecast spacing to chart timeframe
+    if period == "1d":
+        freq = "5min"
+    elif period == "7d":
+        freq = "15min"
+    else:
+        freq = "1D"
 
-# Match forecast spacing to chart timeframe
-if period == "1d":
-    freq = "5min"
-elif period == "7d":
-    freq = "15min"
-else:
-    freq = "1D"
+    future_dates = pd.date_range(
+        df.index[-1],
+        periods=predict_steps + 1,
+        freq=freq
+    )[1:]
 
-future_dates = pd.date_range(
-    df.index[-1],
-    periods=predict_steps + 1,
-    freq=freq
-)[1:]
+    # Confidence band
+    residuals = y - lr.predict(X)
+    std = np.std(residuals)
 
+    upper = lr_pred + std
+    lower = lr_pred - std
 
     figa, axa = plt.subplots(figsize=(12, 4))
-    axa.plot(df.index, df["Close"], label="Historical")
+
+    axa.plot(df.index, df["Close"], label="Historical", linewidth=2)
     axa.plot(future_dates, lr_pred, label="Linear Regression")
     axa.plot(future_dates, rf_pred, label="Random Forest")
+
+    axa.fill_between(
+        future_dates,
+        lower,
+        upper,
+        alpha=0.15,
+        label="Confidence Range"
+    )
+
     axa.legend()
     st.pyplot(figa)
-    st.caption("⚠️ Forecasts are experimental, not financial advice.")
+
+    st.caption(
+        "Forecast projects short-term price direction using recent data. "
+        "Flat projections indicate weak trend strength. "
+        "Best used alongside market regime and ETF flows."
+    )
+
 else:
     st.info("Not enough data for AI predictions yet.")
 
