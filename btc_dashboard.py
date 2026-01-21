@@ -669,13 +669,13 @@ if has_data(btc, ["Close"]) and len(btc) >= 25:  # 1mo will pass now
     # --- Determine forecast spacing + steps ---
     if period == "1d":
         freq = "5min"
-        steps = int(predict_days * 24 * 60 / 5)     # days -> 5m bars
+        steps = int(predict_steps * 24 * 60 / 5)     # days -> 5m bars
     elif period == "7d":
         freq = "15min"
-        steps = int(predict_days * 24 * 60 / 15)    # days -> 15m bars
+        steps = int(predict_steps * 24 * 60 / 15)    # days -> 15m bars
     else:
         freq = "1D"
-        steps = int(predict_days)                   # already in days
+        steps = int(predict_steps)                   # already in days
 
     # Guardrail
     steps = max(5, min(steps, 2000))
@@ -710,7 +710,7 @@ if has_data(btc, ["Close"]) and len(btc) >= 25:  # 1mo will pass now
 
     # Helpful caption so it “makes sense”
     st.caption(
-        f"Forecast horizon: {predict_days} day(s). "
+        f"Forecast horizon: {predict_steps} day(s). "
         f"Using {'intraday bars' if period in ['1d','7d'] else 'daily bars'} "
         f"({steps} prediction steps)."
     )
