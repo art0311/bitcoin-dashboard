@@ -375,9 +375,7 @@ else:
               "VWAP", "OBV", "MACD", "MACD_Signal", "MACD_Hist"]:
         btc[c] = np.nan
 
-# -----------------------------
-# Support & Resistance
-# -----------------------------
+
 # -----------------------------
 # Support & Resistance (separate supports/resistances)
 # -----------------------------
@@ -430,7 +428,6 @@ if has_data(btc, ["Close"]):
         tolerance=sr_tol,
         pivot_eps=0.002
     )
-
 
 
 
@@ -655,67 +652,180 @@ else:
     st.info("Not enough data for MACD.")
 
 # -----------------------------
-# AI Forecasts (adaptive per timeframe)
+# AI Forecasts + Summary Panel (interpretable)
 # -----------------------------
 st.subheader("🤖 AI Forecasts")
 
-if has_data(btc, ["Close"]) and len(btc) >= 25:  # 1mo will pass now
+def _trend_slope(y_vals: np.ndarray) -> float:
+    """Simple slope (price units per step) via polyfit; robust for short series."""
+    y_vals = np.asarray(y_vals, dtype=float)
+    if len(y_vals) < 3:
+        return 0.0
+    x = np.arange(len(y_vals), dtype=float)
+    m, _b = np.polyfit(x, y_vals, 1)
+    return float(m)
+
+def _clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+if has_data(btc, ["Close"]) and len(btc) >= 25:
+
     df = btc[["Close"]].dropna().copy()
     df["t"] = np.arange(len(df))
 
     X = df[["t"]]
     y = df["Close"]
 
-    # --- Determine forecast spacing + steps ---
-    if period == "1d":
-        freq = "5min"
-        steps = int(predict_steps * 24 * 60 / 5)     # days -> 5m bars
-    elif period == "7d":
-        freq = "15min"
-        steps = int(predict_steps * 24 * 60 / 15)    # days -> 15m bars
-    else:
-        freq = "1D"
-        steps = int(predict_steps)                   # already in days
-
-    # Guardrail
-    steps = max(5, min(steps, 2000))
-
-    # --- Fit models ---
+    # Fit models
     lr = LinearRegression().fit(X, y)
     rf = RandomForestRegressor(n_estimators=200, random_state=42).fit(X, y)
+
+    # Forecast horizon
+    steps = int(predict_steps)  # uses your "Prediction Steps (future candles)" slider
 
     future_t = np.arange(len(df), len(df) + steps).reshape(-1, 1)
     lr_pred = lr.predict(future_t)
     rf_pred = rf.predict(future_t)
 
+    # Match spacing to selected timeframe
+    if period == "1d":
+        freq = "5min"
+    elif period == "7d":
+        freq = "15min"
+    else:
+        freq = "1D"
+
     future_dates = pd.date_range(df.index[-1], periods=steps + 1, freq=freq)[1:]
 
-    # --- Confidence band (based on LR residuals) ---
-    residuals = y - lr.predict(X)
-    std = float(np.std(residuals)) if len(residuals) > 3 else 0.0
-    upper = lr_pred + std
-    lower = lr_pred - std
+    # -----------------------------
+    # Confidence band (use LR residual std)
+    # -----------------------------
+    residuals = (y - lr.predict(X)).to_numpy(dtype=float)
+    resid_std = float(np.std(residuals)) if len(residuals) >= 10 else float(np.std(residuals)) if len(residuals) >= 3 else 0.0
 
-    # --- Plot ---
+    upper = lr_pred + resid_std
+    lower = lr_pred - resid_std
+
+    # -----------------------------
+    # AI Summary Panel (Bias / Confidence / Agreement / Expected Range)
+    # -----------------------------
+    # Use last portion of the forecast for slope (reduces noise)
+    tail = max(10, min(50, steps))
+    lr_slope = _trend_slope(lr_pred[-tail:])
+    rf_slope = _trend_slope(rf_pred[-tail:])
+
+    # Normalize slope into a "directional" score using recent volatility
+    # (if volatility is high, a given slope is less meaningful)
+    recent_returns = df["Close"].pct_change().dropna().to_numpy(dtype=float)
+    vol = float(np.std(recent_returns)) if len(recent_returns) >= 10 else (float(np.std(recent_returns)) if len(recent_returns) >= 3 else 0.0)
+
+    # Convert slope (price/step) to pct/step around current price
+    last_price = float(df["Close"].iloc[-1])
+    lr_slope_pct = (lr_slope / max(last_price, 1e-9)) * 100.0
+    rf_slope_pct = (rf_slope / max(last_price, 1e-9)) * 100.0
+
+    # Agreement (same direction?)
+    agree = (lr_slope_pct >= 0 and rf_slope_pct >= 0) or (lr_slope_pct <= 0 and rf_slope_pct <= 0)
+    agreement_label = "High ✅" if agree else "Low ❌"
+
+    # Bias score: combine LR + RF slope and gently incorporate MACD sign if available
+    macd_last = None
+    if has_data(btc, ["MACD"]) and btc["MACD"].notna().sum() >= 2:
+        macd_last = float(btc["MACD"].dropna().iloc[-1])
+
+    slope_combo = 0.6 * lr_slope_pct + 0.4 * rf_slope_pct
+    macd_bonus = 0.15 if (macd_last is not None and macd_last > 0) else (-0.15 if (macd_last is not None and macd_last < 0) else 0.0)
+
+    # Vol-adjusted confidence factor: higher vol => lower confidence
+    # vol here is std of returns per bar (e.g., 15m or daily). Typical BTC can be ~0.2% daily, higher intraday.
+    vol_penalty = _clamp(1.0 - (vol * 80.0), 0.25, 1.0)  # tuned to keep values reasonable
+    agreement_boost = 1.0 if agree else 0.7
+
+    raw_bias = 50.0 + (slope_combo * 120.0) + (macd_bonus * 100.0)  # maps small slope% into 0-100-ish
+    bias_score = _clamp(raw_bias, 0.0, 100.0)
+
+    if bias_score >= 60:
+        bias_label = f"🟢 Bullish ({bias_score:.0f}%)"
+    elif bias_score <= 40:
+        bias_label = f"🔴 Bearish ({bias_score:.0f}%)"
+    else:
+        bias_label = f"🟡 Neutral ({bias_score:.0f}%)"
+
+    # Forecast confidence: based on agreement + vol penalty + residual size
+    # residual size normalized by price
+    resid_pct = (resid_std / max(last_price, 1e-9)) * 100.0
+    resid_penalty = _clamp(1.0 - (resid_pct * 8.0), 0.25, 1.0)  # bigger residuals => lower confidence
+
+    conf_score = _clamp(100.0 * vol_penalty * resid_penalty * agreement_boost, 0.0, 100.0)
+    if conf_score >= 70:
+        conf_label = f"High ({conf_score:.0f}%)"
+        conf_emoji = "🟢"
+    elif conf_score >= 45:
+        conf_label = f"Medium ({conf_score:.0f}%)"
+        conf_emoji = "🟡"
+    else:
+        conf_label = f"Low ({conf_score:.0f}%)"
+        conf_emoji = "🔴"
+
+    # Expected range (next N steps):
+    # Use confidence band AND a simple ATR-style estimate when High/Low available
+    # We'll compute ATR on your existing btc if possible; fallback to residual band.
+    exp_low = float(np.min(lower)) if len(lower) else np.nan
+    exp_high = float(np.max(upper)) if len(upper) else np.nan
+
+    if has_data(btc, ["High", "Low", "Close"]) and len(btc) >= 20:
+        h = btc["High"].astype(float)
+        l = btc["Low"].astype(float)
+        c = btc["Close"].astype(float)
+        tr = pd.concat([(h - l), (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        atr = float(tr.rolling(14, min_periods=5).mean().iloc[-1]) if tr.notna().sum() >= 5 else None
+        if atr is not None and np.isfinite(atr):
+            # Blend ATR with residual std for a more realistic range
+            band = max(resid_std, atr * 0.6)
+            exp_low = float(min(exp_low, last_price - band)) if np.isfinite(exp_low) else float(last_price - band)
+            exp_high = float(max(exp_high, last_price + band)) if np.isfinite(exp_high) else float(last_price + band)
+
+    # -----------------------------
+    # Render summary panel
+    # -----------------------------
+    with st.expander("📌 AI Forecast Summary (how to read this)", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Bias", bias_label)
+        c2.metric("Confidence", f"{conf_emoji} {conf_label}")
+        c3.metric("Model Agreement", agreement_label)
+        c4.metric("Horizon", f"{steps} steps ({freq})")
+
+        if np.isfinite(exp_low) and np.isfinite(exp_high):
+            st.markdown(
+                f"**Expected range (next {steps} steps):** "
+                f"Low **${exp_low:,.0f}**  •  High **${exp_high:,.0f}**"
+            )
+        else:
+            st.caption("Expected range unavailable (not enough volatility history).")
+
+        st.caption(
+            "Tip: **Bias** is directional drift. **Confidence** drops in choppy/high-vol markets or when models disagree. "
+            "Use this alongside Market Regime, ETF flows, and S/R—never as a standalone signal."
+        )
+
+    # -----------------------------
+    # Plot forecast
+    # -----------------------------
     figa, axa = plt.subplots(figsize=(12, 4))
     axa.plot(df.index, df["Close"], label="Historical", linewidth=2)
     axa.plot(future_dates, lr_pred, label="Linear Regression")
     axa.plot(future_dates, rf_pred, label="Random Forest")
 
-    if std > 0:
-        axa.fill_between(future_dates, lower, upper, alpha=0.15, label="Confidence Range")
+    if resid_std > 0:
+        axa.fill_between(future_dates, lower, upper, alpha=0.15, label="Confidence Range (±1σ)")
 
     axa.legend()
     st.pyplot(figa)
 
-    # Helpful caption so it “makes sense”
-    st.caption(
-        f"Forecast horizon: {predict_steps} day(s). "
-        f"Using {'intraday bars' if period in ['1d','7d'] else 'daily bars'} "
-        f"({steps} prediction steps)."
-    )
 else:
-    st.info("Not enough data for AI predictions yet (need ~25+ points).")
+    st.info("Not enough data for AI predictions yet (need ~25+ data points).")
+
 
 
 
