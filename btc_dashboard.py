@@ -131,7 +131,7 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
     """
     urls = [
         "https://defillama2.llamao.fi/etfs",  # mirror (usually works on Streamlit Cloud)
-        "https://defillama.com/etfs",
+        "https://defillama.com/etfs",         # often 403 from cloud
     ]
 
     headers = {
@@ -146,38 +146,42 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
         dbg["error"] = "asset_label must be 'Bitcoin' or 'Ethereum'"
         return None, dbg
 
-    # Find asset section, then find Flows value near it
-    value_pat = re.compile(
-        r"Flows[\s\S]{0,250}?([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
+    # ✅ Key change: match the correct "Daily Stats" style block anywhere in the HTML
+    # Examples seen: "Ethereum ... Flows-$230m", "Bitcoin ... Flows-$160.8m"
+    pat = re.compile(
+        rf"{re.escape(asset_label)}[\s\S]{{0,1200}}?"
+        r"Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
         re.IGNORECASE
     )
 
     for url in urls:
-        info = {"url": url, "status": None, "len": None, "matched": False, "flows_snippet": None}
+        info = {
+            "url": url, "status": None, "len": None,
+            "matched": False, "flows_snippet": None
+        }
+
         try:
             r = requests.get(url, headers=headers, timeout=15)
             info["status"] = r.status_code
             html = r.text or ""
             info["len"] = len(html)
 
-            if r.status_code != 200:
+            if r.status_code != 200 or len(html) < 1000:
                 dbg["tried"].append(info)
                 continue
 
-            idx = html.lower().find(asset_label.lower())
-            if idx == -1:
-                dbg["tried"].append(info)
-                continue
-
-            window = html[idx: idx + 8000]  # big enough window
-            fidx = window.lower().find("flows")
-            if fidx != -1:
-                info["flows_snippet"] = window[max(0, fidx - 150): fidx + 220]
-
-            m = value_pat.search(window)
+            m = pat.search(html)
             if not m:
+                # helpful snippet if "Flows" exists at all
+                fidx = html.lower().find("flows")
+                if fidx != -1:
+                    info["flows_snippet"] = html[max(0, fidx-160):fidx+220]
                 dbg["tried"].append(info)
                 continue
+
+            # store snippet around match
+            s, e = m.start(), m.end()
+            info["flows_snippet"] = html[max(0, s-160):min(len(html), e+160)]
 
             sign = -1.0 if (m.group(1) == "-") else 1.0
             num = float(m.group(2).replace(",", ""))
@@ -192,9 +196,9 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
         except Exception as e:
             info["error"] = str(e)
             dbg["tried"].append(info)
-            continue
 
     return None, dbg
+
 
 
 
