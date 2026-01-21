@@ -202,6 +202,14 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
 # -----------------------------
 # Sidebar
 # -----------------------------
+st.sidebar.title("⚙️ Settings")
+
+symbol = st.sidebar.selectbox("Asset", ["BTC-USD", "ETH-USD"], index=0)
+
+ASSET_TICKER = symbol.replace("-USD", "")
+ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else "Ethereum"
+ETF_ASSET_LABEL = ASSET_NAME
+
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
