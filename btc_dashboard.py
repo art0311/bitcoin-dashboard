@@ -237,7 +237,7 @@ else:
 
     st.sidebar.caption("Source: DefiLlama (flows attributed to Farside)")
 
-btc = load_data(symbol, period)
+
 
 # -----------------------------
 # Fear & Greed (Sidebar Gauge)
