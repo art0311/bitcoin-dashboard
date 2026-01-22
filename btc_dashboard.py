@@ -125,13 +125,9 @@ def market_strength_score(btc: pd.DataFrame):
 # -----------------------------
 @st.cache_data(ttl=900)
 def fetch_spot_etf_flow_usdm_debug(asset_label: str):
-    """
-    Returns (flow_usdm, debug_dict)
-    flow_usdm = float in USD millions (e.g., 3000.0 means $3.0B)
-    """
     urls = [
-        "https://defillama2.llamao.fi/etfs",  # mirror (works on Streamlit Cloud)
-        "https://defillama.com/etfs",         # often 403 from cloud
+        "https://defillama2.llamao.fi/etfs",
+        "https://defillama.com/etfs",
     ]
 
     headers = {
@@ -146,16 +142,15 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
         dbg["error"] = "asset_label must be 'Bitcoin' or 'Ethereum'"
         return None, dbg
 
-    # value pattern inside the asset card
     value_pat = re.compile(
         r"Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
         re.IGNORECASE
     )
 
-    # robust "card header" anchors
+    # ✅ FIXED anchors (match your actual HTML)
     anchors = [
-        re.compile(rf'font-semibold"\s*>\s*{re.escape(asset_label)}\s*<', re.IGNORECASE),
-        re.compile(rf'>\s*{re.escape(asset_label)}\s*<', re.IGNORECASE),
+        re.compile(rf'>{re.escape(asset_label)}\s*<', re.IGNORECASE),
+        re.compile(rf'font-semibold[^>]*>\s*{re.escape(asset_label)}\s*<', re.IGNORECASE),
     ]
 
     for url in urls:
@@ -170,7 +165,6 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
                 dbg["tried"].append(info)
                 continue
 
-            # 1) locate the asset card by finding the *first* good anchor match
             start_idx = -1
             used_anchor = None
             for a in anchors:
@@ -181,17 +175,14 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
                     break
 
             if start_idx == -1:
-                # debug: show if asset exists at all
                 info["flows_snippet"] = f"(anchor not found) has_asset={asset_label.lower() in html.lower()}"
                 dbg["tried"].append(info)
                 continue
 
-            # 2) search forward inside a big window from that anchor
-            window = html[start_idx : start_idx + 12000]  # enough to include flows + AUM blocks
+            window = html[start_idx : start_idx + 12000]
 
             m2 = value_pat.search(window)
             if not m2:
-                # give a clue where flows is in that window
                 fidx = window.lower().find("flows")
                 if fidx != -1:
                     info["flows_snippet"] = window[max(0, fidx-180):fidx+260]
@@ -200,13 +191,13 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
                 dbg["tried"].append(info)
                 continue
 
-            # snippet around match for debug
             s, e = m2.start(), m2.end()
             info["flows_snippet"] = window[max(0, s-180):min(len(window), e+180)]
 
             sign = -1.0 if (m2.group(1) == "-") else 1.0
             num = float(m2.group(2).replace(",", ""))
             unit = m2.group(3).lower()
+
             flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
 
             info["matched"] = True
@@ -219,10 +210,6 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
             dbg["tried"].append(info)
 
     return None, dbg
-
-
-
-
 
 
 # -----------------------------
