@@ -219,6 +219,14 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
             dbg["tried"].append(info)
             return flow_usdm, dbg
 
+        except Exception as e:
+            info["error"] = str(e)
+            dbg["tried"].append(info)
+            continue
+
+    return None, dbg
+
+
 
 # -----------------------------
 # Sidebar
