@@ -181,35 +181,33 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
 
             window = html[start_idx : start_idx + 12000]
 
-            m2 = value_pat.search(window)
-            if not m2:
-                fidx = window.lower().find("flows")
-                if fidx != -1:
-                    info["flows_snippet"] = window[max(0, fidx-180):fidx+260]
-                else:
-                    info["flows_snippet"] = "(no 'Flows' found near asset anchor)"
-                dbg["tried"].append(info)
-                continue
+            # 1) find the "Flows" label inside the window
+flows_label = re.search(r">\s*Flows\s*<", window, flags=re.IGNORECASE)
+if not flows_label:
+    info["flows_snippet"] = "(no Flows label found near asset anchor)"
+    dbg["tried"].append(info)
+    continue
 
-            s, e = m2.start(), m2.end()
-            info["flows_snippet"] = window[max(0, s-180):min(len(window), e+180)]
+# 2) search shortly AFTER the label for the first signed value like -$708.7m or -708.7m
+tail = window[flows_label.end() : flows_label.end() + 800]
 
-            sign = -1.0 if (m2.group(1) == "-") else 1.0
-            num = float(m2.group(2).replace(",", ""))
-            unit = m2.group(3).lower()
+m2 = re.search(r"([+-])\s*\$?\s*([0-9][0-9,\.]*)\s*([mMbB])", tail, flags=re.IGNORECASE)
+if not m2:
+    info["flows_snippet"] = tail[:350]
+    dbg["tried"].append(info)
+    continue
 
-            flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
+sign = -1.0 if m2.group(1) == "-" else 1.0
+num = float(m2.group(2).replace(",", ""))
+unit = m2.group(3).lower()
+flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
 
-            info["matched"] = True
-            info["pattern_used"] = used_anchor
-            dbg["tried"].append(info)
-            return flow_usdm, dbg
+info["matched"] = True
+info["pattern_used"] = "flows_label_then_number"
+info["flows_snippet"] = tail[:350]   # show what's being parsed
+dbg["tried"].append(info)
+return flow_usdm, dbg
 
-        except Exception as e:
-            info["error"] = str(e)
-            dbg["tried"].append(info)
-
-    return None, dbg
 
 
 # -----------------------------
