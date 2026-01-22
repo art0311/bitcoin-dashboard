@@ -297,12 +297,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
-flow, etf_debug = fetch_spot_etf_flow_usdm_debug(ETF_ASSET_LABEL)
-
-# Always show debug (for now)
-st.sidebar.caption("ETF debug (collapsed)")
-with st.sidebar.expander("ETF debug", expanded=False):
-    st.write(etf_debug)
+flow, _ = fetch_spot_etf_flow_usdm_debug(ETF_ASSET_LABEL)
 
 # History per asset
 hist_key = f"etf_flow_hist_{ASSET_TICKER}"
