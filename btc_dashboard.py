@@ -130,7 +130,7 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
     flow_usdm = float in USD millions (e.g., 3000.0 means $3.0B)
     """
     urls = [
-        "https://defillama2.llamao.fi/etfs",  # mirror (usually works on Streamlit Cloud)
+        "https://defillama2.llamao.fi/etfs",  # mirror (works on Streamlit Cloud)
         "https://defillama.com/etfs",         # often 403 from cloud
     ]
 
@@ -146,50 +146,71 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
         dbg["error"] = "asset_label must be 'Bitcoin' or 'Ethereum'"
         return None, dbg
 
-    # ✅ Key change: match the correct "Daily Stats" style block anywhere in the HTML
-    # Examples seen: "Ethereum ... Flows-$230m", "Bitcoin ... Flows-$160.8m"
-    pat = re.compile(
-        rf"{re.escape(asset_label)}[\s\S]{{0,1200}}?"
+    # value pattern inside the asset card
+    value_pat = re.compile(
         r"Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
         re.IGNORECASE
     )
 
-    for url in urls:
-        info = {
-            "url": url, "status": None, "len": None,
-            "matched": False, "flows_snippet": None
-        }
+    # robust "card header" anchors
+    anchors = [
+        re.compile(rf'font-semibold"\s*>\s*{re.escape(asset_label)}\s*<', re.IGNORECASE),
+        re.compile(rf'>\s*{re.escape(asset_label)}\s*<', re.IGNORECASE),
+    ]
 
+    for url in urls:
+        info = {"url": url, "status": None, "len": None, "matched": False, "flows_snippet": None}
         try:
             r = requests.get(url, headers=headers, timeout=15)
             info["status"] = r.status_code
             html = r.text or ""
             info["len"] = len(html)
 
-            if r.status_code != 200 or len(html) < 1000:
+            if r.status_code != 200 or len(html) < 5000:
                 dbg["tried"].append(info)
                 continue
 
-            m = pat.search(html)
-            if not m:
-                # helpful snippet if "Flows" exists at all
-                fidx = html.lower().find("flows")
+            # 1) locate the asset card by finding the *first* good anchor match
+            start_idx = -1
+            used_anchor = None
+            for a in anchors:
+                m = a.search(html)
+                if m:
+                    start_idx = m.start()
+                    used_anchor = a.pattern
+                    break
+
+            if start_idx == -1:
+                # debug: show if asset exists at all
+                info["flows_snippet"] = f"(anchor not found) has_asset={asset_label.lower() in html.lower()}"
+                dbg["tried"].append(info)
+                continue
+
+            # 2) search forward inside a big window from that anchor
+            window = html[start_idx : start_idx + 12000]  # enough to include flows + AUM blocks
+
+            m2 = value_pat.search(window)
+            if not m2:
+                # give a clue where flows is in that window
+                fidx = window.lower().find("flows")
                 if fidx != -1:
-                    info["flows_snippet"] = html[max(0, fidx-160):fidx+220]
+                    info["flows_snippet"] = window[max(0, fidx-180):fidx+260]
+                else:
+                    info["flows_snippet"] = "(no 'Flows' found near asset anchor)"
                 dbg["tried"].append(info)
                 continue
 
-            # store snippet around match
-            s, e = m.start(), m.end()
-            info["flows_snippet"] = html[max(0, s-160):min(len(html), e+160)]
+            # snippet around match for debug
+            s, e = m2.start(), m2.end()
+            info["flows_snippet"] = window[max(0, s-180):min(len(window), e+180)]
 
-            sign = -1.0 if (m.group(1) == "-") else 1.0
-            num = float(m.group(2).replace(",", ""))
-            unit = m.group(3).lower()
-
+            sign = -1.0 if (m2.group(1) == "-") else 1.0
+            num = float(m2.group(2).replace(",", ""))
+            unit = m2.group(3).lower()
             flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
 
             info["matched"] = True
+            info["pattern_used"] = used_anchor
             dbg["tried"].append(info)
             return flow_usdm, dbg
 
@@ -198,6 +219,7 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
             dbg["tried"].append(info)
 
     return None, dbg
+
 
 
 
