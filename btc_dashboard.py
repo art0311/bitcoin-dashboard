@@ -26,6 +26,18 @@ def safe_last(x):
     except Exception:
         return None
 
+def nearest_sr_from_lists(price: float, supports, resistances):
+    """Return nearest valid support below price and resistance above price."""
+    if price is None or not np.isfinite(price):
+        return None, None
+
+    valid_supports = sorted(float(x) for x in supports if np.isfinite(x) and float(x) < price)
+    valid_resistances = sorted(float(x) for x in resistances if np.isfinite(x) and float(x) > price)
+
+    nearest_support = valid_supports[-1] if valid_supports else None
+    nearest_resistance = valid_resistances[0] if valid_resistances else None
+    return nearest_support, nearest_resistance
+
 def market_regime(btc: pd.DataFrame):
     if btc is None or btc.empty or len(btc) < 15:
         return "Unknown", "⚪", {}
@@ -120,29 +132,21 @@ def market_strength_score(btc: pd.DataFrame):
 
     return score, label
 
-def nearest_sr_from_lists(price: float, supports: list[float], resistances: list[float]):
-    """Return nearest support below and nearest resistance above."""
-    if price is None or not np.isfinite(price):
-        return None, None
-
-    s = [float(x) for x in supports if np.isfinite(x)]
-    r = [float(x) for x in resistances if np.isfinite(x)]
-
-    support_below = [x for x in s if x < price]
-    resist_above = [x for x in r if x > price]
-
-    nearest_support = max(support_below) if support_below else (min(s) if s else None)
-    nearest_resist = min(resist_above) if resist_above else (max(r) if r else None)
-
-    return nearest_support, nearest_resist
-
 # -----------------------------
-# Spot BTC/ETH ETF Daily Net Flow (US$mm) - robust (no read_html)
+# Spot BTC ETF Daily Net Flow (US$mm) - robust (no read_html)
 # -----------------------------
 @st.cache_data(ttl=900)
-def fetch_spot_etf_flow_usdm_debug(asset_label: str):
+def fetch_spot_etf_flow_usdm(asset_label: str):
+    """
+    Returns latest daily net flow for US spot crypto ETFs in USD millions (float).
+    Supports: "Bitcoin", "Ethereum"
+    Source: DefiLlama (flows attributed to Farside on the page).
+    """
+    if asset_label not in ("Bitcoin", "Ethereum"):
+        return None
+
     urls = [
-        "https://defillama2.llamao.fi/etfs",
+        "https://defillama2.llamao.fi/etfs",  # mirror works on Streamlit Cloud
         "https://defillama.com/etfs",
     ]
 
@@ -152,92 +156,52 @@ def fetch_spot_etf_flow_usdm_debug(asset_label: str):
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    dbg = {"asset": asset_label, "tried": []}
-
-    if asset_label not in ("Bitcoin", "Ethereum"):
-        dbg["error"] = "asset_label must be 'Bitcoin' or 'Ethereum'"
-        return None, dbg
-
-    # ✅ FIXED anchors (match your actual HTML)
-    anchors = [
-        re.compile(rf'>{re.escape(asset_label)}\s*<', re.IGNORECASE),
-        re.compile(rf'font-semibold[^>]*>\s*{re.escape(asset_label)}\s*<', re.IGNORECASE),
-    ]
+    # Example snippets:
+    # Bitcoin ... Flows -$394.7m
+    # Ethereum ... Flows $2.91b
+    pattern = (
+        rf"{asset_label}[\s\S]{{0,2500}}?"
+        r"Flows[^0-9\-+]*"
+        r"([+-])?\$?\s*"
+        r"([0-9][0-9,\.]*)\s*"
+        r"([mMbB])"
+    )
 
     for url in urls:
-        info = {"url": url, "status": None, "len": None, "matched": False, "flows_snippet": None}
         try:
             r = requests.get(url, headers=headers, timeout=15)
-            info["status"] = r.status_code
-            html = r.text or ""
-            info["len"] = len(html)
-
-            if r.status_code != 200 or len(html) < 5000:
-                dbg["tried"].append(info)
+            if r.status_code != 200:
                 continue
 
-            start_idx = -1
-            for a in anchors:
-                m = a.search(html)
-                if m:
-                    start_idx = m.start()
-                    break
-
-            if start_idx == -1:
-                info["flows_snippet"] = f"(anchor not found) has_asset={asset_label.lower() in html.lower()}"
-                dbg["tried"].append(info)
+            html = r.text
+            m = re.search(pattern, html, flags=re.IGNORECASE)
+            if not m:
                 continue
 
-            window = html[start_idx : start_idx + 12000]
+            sign = -1.0 if (m.group(1) == "-") else 1.0
+            num = float(m.group(2).replace(",", ""))
+            unit = m.group(3).lower()
 
-            flows_label = re.search(r">\s*Flows\s*<", window, flags=re.IGNORECASE)
-            if not flows_label:
-                info["flows_snippet"] = "(no Flows label found near asset anchor)"
-                dbg["tried"].append(info)
-                continue
+            # normalize to USD millions
+            return sign * num * (1000.0 if unit == "b" else 1.0)
 
-            tail = window[flows_label.end() : flows_label.end() + 800]
-
-            m2 = re.search(
-                r"([+-])\s*\$?\s*([0-9][0-9,\.]*)\s*([mMbB])",
-                tail,
-                flags=re.IGNORECASE,
-            )
-
-            if not m2:
-                info["flows_snippet"] = tail[:350]
-                dbg["tried"].append(info)
-                continue
-
-            sign = -1.0 if m2.group(1) == "-" else 1.0
-            num = float(m2.group(2).replace(",", ""))
-            unit = m2.group(3).lower()
-
-            flow_usdm = sign * num * (1000.0 if unit == "b" else 1.0)
-
-            info["matched"] = True
-            info["pattern_used"] = "flows_label_then_number"
-            info["flows_snippet"] = tail[:350]
-            dbg["tried"].append(info)
-            return flow_usdm, dbg
-
-        except Exception as e:
-            info["error"] = str(e)
-            dbg["tried"].append(info)
+        except Exception:
             continue
 
-    return None, dbg
+    return None
+
+
 
 # -----------------------------
 # Sidebar
 # -----------------------------
 st.sidebar.title("⚙️ Settings")
-
 symbol = st.sidebar.selectbox("Asset", ["BTC-USD", "ETH-USD"], index=0)
 
+# Asset labels
 ASSET_TICKER = symbol.replace("-USD", "")
-ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else "Ethereum"
-ETF_ASSET_LABEL = ASSET_NAME
+ASSET_NAME = "Bitcoin" if symbol == "BTC-USD" else ("Ethereum" if symbol == "ETH-USD" else ASSET_TICKER)
+ETF_ASSET_LABEL = "Bitcoin" if symbol == "BTC-USD" else ("Ethereum" if symbol == "ETH-USD" else None)
 
 period = st.sidebar.selectbox(
     "Time Range",
@@ -254,33 +218,35 @@ predict_steps = st.sidebar.slider(
 )
 
 # -----------------------------
-# Sidebar: Display Controls (NEW)
+# Sidebar: Display Controls
 # -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧩 Display Controls")
 
-indicator_opts = [
-    "SMA Short", "SMA Medium", "SMA Long",
+indicator_options = [
+    "SMA Short",
+    "SMA Medium",
+    "SMA Long",
     "VWAP",
     "Bollinger Bands",
     "Support/Resistance",
 ]
-default_indicators = ["SMA Short", "SMA Medium", "SMA Long", "VWAP", "Bollinger Bands", "Support/Resistance"]
 
 show_indicators = st.sidebar.multiselect(
     "Indicators on price chart",
-    indicator_opts,
-    default=default_indicators,
+    indicator_options,
+    default=indicator_options,
 )
 
-panel_opts = ["Volume", "RSI", "MACD", "OBV", "AI Forecast"]
-default_panels = ["Volume", "RSI", "MACD", "OBV", "AI Forecast"]
-
+panel_options = ["Volume", "RSI", "OBV", "MACD", "AI Forecast"]
 show_panels = st.sidebar.multiselect(
     "Panels to show",
-    panel_opts,
-    default=default_panels,
+    panel_options,
+    default=panel_options,
 )
+
+
+
 
 # -----------------------------
 # Fear & Greed (Sidebar Gauge)
@@ -319,23 +285,24 @@ if sentiment_score is not None:
 else:
     st.sidebar.info("Could not fetch sentiment data.")
 
-# -----------------------------
-# ETF Flows (Sidebar)
-# -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
-flow, _ = fetch_spot_etf_flow_usdm_debug(ETF_ASSET_LABEL)
+flow = fetch_spot_etf_flow_usdm(ETF_ASSET_LABEL) if ETF_ASSET_LABEL else None
 
-# History per asset
+# Store a small history in session_state so we can do 7-entry rolling trend
+# (persists while the app stays running)
 hist_key = f"etf_flow_hist_{ASSET_TICKER}"
 if hist_key not in st.session_state:
     st.session_state[hist_key] = []
 
+# Update history if we got a valid number
 if flow is not None and np.isfinite(flow):
     hist = st.session_state[hist_key]
+    # prevent duplicate repeats on reruns if the value hasn't changed
     if not hist or hist[-1] != float(flow):
         hist.append(float(flow))
+    # keep last 30 values
     st.session_state[hist_key] = hist[-30:]
 
 if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
@@ -343,14 +310,33 @@ if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
 else:
     label = "🟢 Net Inflow" if flow > 0 else ("🔴 Net Outflow" if flow < 0 else "🟡 Flat")
     st.sidebar.metric("Latest Daily ETF Flow", f"{flow:,.1f} US$mm", label)
-    st.sidebar.caption("Source: DefiLlama mirror (flows attributed to Farside)")
+    st.sidebar.caption("Source: DefiLlama (flows attributed to Farside on page)")
 
+# --- 7-entry rolling trend label (based on stored history) ---
 hist = st.session_state.get(hist_key, [])
 if len(hist) >= 7:
     last7_sum = float(np.sum(hist[-7:]))
     st.sidebar.metric("7-entry rolling net flow", f"{last7_sum:,.1f} US$mm")
+
+    if len(hist) >= 14:
+        prev7_sum = float(np.sum(hist[-14:-7]))
+        delta = last7_sum - prev7_sum
+
+        rel = abs(delta) / max(abs(prev7_sum), 1e-9)
+        if abs(delta) < 50 and rel < 0.25:
+            trend = "🟡 Flat / Mixed"
+        elif delta > 0:
+            trend = "🟢 Rising (more inflow)"
+        else:
+            trend = "🔴 Falling (more outflow)"
+
+        st.sidebar.metric("7-entry trend", trend, f"Δ vs prior 7: {delta:+,.1f} US$mm")
+    else:
+        st.sidebar.caption("7-entry trend: Need 14 values for comparison.")
 else:
     st.sidebar.caption("7-entry trend: collecting data (need 7 refreshes).")
+
+
 
 # -----------------------------
 # Data Loader
@@ -392,6 +378,7 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
 
     n = len(btc)
 
+    # Better adaptive SMA windows (scale with data length)
     sma_short_w = int(max(5, round(n * 0.05)))
     sma_med_w   = int(max(10, round(n * 0.15)))
     sma_long_w  = int(max(20, round(n * 0.35)))
@@ -408,12 +395,14 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
     btc["SMA_medium"] = close.rolling(sma_med_w,   min_periods=1).mean()
     btc["SMA_long"]   = close.rolling(sma_long_w,  min_periods=1).mean()
 
+    # Bollinger Bands
     bb_w = max(5, min(20, n))
     bb_mid = close.rolling(bb_w, min_periods=1).mean()
     bb_std = close.rolling(bb_w, min_periods=2).std()
     btc["BB_upper"] = bb_mid + 2 * bb_std
     btc["BB_lower"] = bb_mid - 2 * bb_std
 
+    # RSI
     rsi_w = max(5, min(14, n - 1))
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -423,13 +412,16 @@ if has_data(btc, ["Close", "High", "Low", "Volume"]) and len(btc) >= 2:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     btc["RSI"] = 100 - (100 / (1 + rs))
 
+    # VWAP
     typical = (high + low + close) / 3.0
     denom = vol.replace(0, np.nan).cumsum()
     btc["VWAP"] = (typical * vol).cumsum() / denom
 
+    # OBV
     direction = np.sign(close.diff()).fillna(0)
     btc["OBV"] = (direction * vol).fillna(0).cumsum()
 
+    # MACD
     if period in ["1d", "7d"]:
         fast, slow, sig = 6, 13, 4
     else:
@@ -444,6 +436,7 @@ else:
     for c in ["SMA_short", "SMA_medium", "SMA_long", "BB_upper", "BB_lower", "RSI",
               "VWAP", "OBV", "MACD", "MACD_Signal", "MACD_Hist"]:
         btc[c] = np.nan
+
 
 # -----------------------------
 # Support & Resistance (separate supports/resistances)
@@ -463,6 +456,7 @@ def detect_support_resistance(series, window=20, tolerance=0.015, pivot_eps=0.00
         seg_min = float(np.min(seg))
         seg_max = float(np.max(seg))
 
+        # Near-min / near-max pivots
         if cur <= seg_min * (1 + pivot_eps):
             supports.append(cur)
         if cur >= seg_max * (1 - pivot_eps):
@@ -480,12 +474,14 @@ def detect_support_resistance(series, window=20, tolerance=0.015, pivot_eps=0.00
 
     return cluster(supports), cluster(resistances)
 
+
+# Adaptive window per range (works across all)
 supports, resistances = [], []
 sr_window = None
 
 if has_data(btc, ["Close"]):
     n = len(btc)
-    sr_window = int(np.clip(n * 0.12, 4, 40))
+    sr_window = int(np.clip(n * 0.12, 4, 40))  # good across 1mo -> max
     sr_tol = 0.02 if n < 60 else 0.015
 
     supports, resistances = detect_support_resistance(
@@ -495,13 +491,19 @@ if has_data(btc, ["Close"]):
         pivot_eps=0.002
     )
 
+
+
 # -----------------------------
-# Header + Top Metrics (+ Nearest S/R metrics)  ✅ UPDATED
+# Header + Top Metrics (includes nearest S/R)
 # -----------------------------
 st.title(f"📊 {ASSET_NAME} Live Dashboard")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
 
-col1, col2, col3, col4, col5, col6, col7, col8, col9 = st.columns(9)
+metric_cols = st.columns(9)
+col1, col2, col3, col4, col5, col6, col7, col8, col9 = metric_cols
+
+regime = "Unknown"
+dist = None
 
 if has_data(btc, ["Close"]) and len(btc) >= 2:
     price = float(btc["Close"].iloc[-1])
@@ -526,26 +528,30 @@ if has_data(btc, ["Close"]) and len(btc) >= 2:
     score, score_label = market_strength_score(btc)
     col7.metric("Strength Score", f"{score}/100" if score is not None else "N/A", score_label)
 
-    near_s, near_r = nearest_sr_from_lists(price, supports, resistances)
+    nearest_support, nearest_resistance = nearest_sr_from_lists(price, supports, resistances)
 
-    if near_s is not None:
-        pct = (near_s - price) / price * 100.0
-        col8.metric("Nearest Support", f"${near_s:,.0f}", f"{pct:.2f}%")
+    if nearest_support is not None:
+        support_pct = (nearest_support - price) / price * 100.0
+        col8.metric("Nearest Support", f"${nearest_support:,.0f}", f"{support_pct:.2f}%")
     else:
-        col8.metric("Nearest Support", "N/A", "")
+        col8.metric("Nearest Support", "N/A")
 
-    if near_r is not None:
-        pct = (near_r - price) / price * 100.0
-        col9.metric("Nearest Resistance", f"${near_r:,.0f}", f"{pct:.2f}%")
+    if nearest_resistance is not None:
+        resistance_pct = (nearest_resistance - price) / price * 100.0
+        col9.metric("Nearest Resistance", f"${nearest_resistance:,.0f}", f"{resistance_pct:+.2f}%")
     else:
-        col9.metric("Nearest Resistance", "N/A", "")
-
+        col9.metric("Nearest Resistance", "N/A")
 else:
-    for c in [col1, col2, col3, col4, col5, col6, col7, col8, col9]:
-        c.metric("Loading...", "")
+    labels = [
+        f"{ASSET_TICKER} Price", "SMA Short", "SMA Medium", "SMA Long",
+        "Market Regime", "Dist vs SMA Long", "Strength Score",
+        "Nearest Support", "Nearest Resistance",
+    ]
+    for column, label in zip(metric_cols, labels):
+        column.metric(label, "Loading...")
 
 # -----------------------------
-# Price + Overlays (with toggles) ✅ UPDATED
+# Price + Overlays (with indicator toggles)
 # -----------------------------
 st.subheader("📈 Price + Indicators")
 
@@ -553,54 +559,53 @@ if has_data(btc, ["Close"]):
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(btc.index, btc["Close"], label="Price")
 
-    # SMA overlays
     if "SMA Short" in show_indicators and "SMA_short" in btc.columns:
         ax.plot(btc.index, btc["SMA_short"], label="SMA Short")
     if "SMA Medium" in show_indicators and "SMA_medium" in btc.columns:
         ax.plot(btc.index, btc["SMA_medium"], label="SMA Medium")
     if "SMA Long" in show_indicators and "SMA_long" in btc.columns:
         ax.plot(btc.index, btc["SMA_long"], label="SMA Long", linewidth=2.0)
-
-    # VWAP
     if "VWAP" in show_indicators and "VWAP" in btc.columns:
         ax.plot(btc.index, btc["VWAP"], label="VWAP", linestyle="--")
+    if "Bollinger Bands" in show_indicators:
+        if "BB_upper" in btc.columns:
+            ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
+        if "BB_lower" in btc.columns:
+            ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
 
-    # Bollinger
-    if "Bollinger Bands" in show_indicators and "BB_upper" in btc.columns and "BB_lower" in btc.columns:
-        ax.plot(btc.index, btc["BB_upper"], label="BB Upper", linestyle="--", alpha=0.5)
-        ax.plot(btc.index, btc["BB_lower"], label="BB Lower", linestyle="--", alpha=0.5)
-
-    # Support/Resistance (nearest + a few supports)
-    if "Support/Resistance" in show_indicators and supports and resistances:
+    if "Support/Resistance" in show_indicators:
         price_now = float(btc["Close"].iloc[-1])
-        near_s, near_r = nearest_sr_from_lists(price_now, supports, resistances)
+        nearest_support, nearest_resistance = nearest_sr_from_lists(price_now, supports, resistances)
 
-        # draw up to 3 closest supports below price (clean, not cluttered)
-        support_below = sorted([s for s in supports if s < price_now])[-3:]
+        support_below = sorted([s for s in supports if np.isfinite(s) and s < price_now])[-3:]
+        if not support_below and nearest_support is not None:
+            support_below = [nearest_support]
+
         for lvl in support_below:
-            ax.axhline(lvl, linestyle="--", linewidth=1.2, alpha=0.85)
+            ax.axhline(lvl, linestyle="--", linewidth=1.3, alpha=0.85, color="green")
             ax.text(
                 btc.index[-1], lvl, f"S: {lvl:,.0f}",
-                va="center", ha="left", fontsize=9,
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=2)
+                va="center", ha="left", fontsize=9, color="green",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=2),
             )
 
-        if near_r is not None:
-            ax.axhline(near_r, linestyle="--", linewidth=2.0, alpha=0.95)
+        if nearest_resistance is not None:
+            ax.axhline(nearest_resistance, linestyle="--", linewidth=2.0, alpha=0.95, color="red")
             ax.text(
-                btc.index[-1], near_r, f"R: {near_r:,.0f}",
-                va="center", ha="left", fontsize=9,
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=2)
+                btc.index[-1], nearest_resistance, f"R: {nearest_resistance:,.0f}",
+                va="center", ha="left", fontsize=9, color="red",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=2),
             )
 
     ax.set_ylabel("USD")
     ax.legend()
     st.pyplot(fig)
+    plt.close(fig)
 else:
     st.info("Not enough data to plot price.")
 
 # -----------------------------
-# Volume (toggle) ✅ UPDATED
+# Volume
 # -----------------------------
 if "Volume" in show_panels:
     st.subheader("📊 Volume")
@@ -613,13 +618,14 @@ if "Volume" in show_panels:
         st.info("Not enough data for volume.")
 
 # -----------------------------
-# RSI (toggle) ✅ UPDATED
+# RSI
 # -----------------------------
 if "RSI" in show_panels:
     st.subheader("📉 RSI (Relative Strength Index)")
     st.caption(
         "Measures how fast and how far price has moved recently. "
-        "Above ~70 can be overbought; below ~30 can be oversold."
+        "Values above 70 suggest the asset may be overbought, "
+        "while values below 30 suggest it may be oversold."
     )
 
     if has_data(btc, ["RSI"]) and btc["RSI"].notna().sum() >= 2:
@@ -634,13 +640,14 @@ if "RSI" in show_panels:
         st.info("Not enough data for RSI.")
 
 # -----------------------------
-# OBV (toggle) ✅ UPDATED
+# OBV
 # -----------------------------
 if "OBV" in show_panels:
     st.subheader("💰 OBV (On-Balance Volume)")
     st.caption(
         "Tracks whether volume is flowing into or out of the asset. "
-        "Rising OBV suggests buyers are in control; falling OBV suggests selling pressure."
+        "Rising OBV suggests buyers are in control, "
+        "while falling OBV indicates selling pressure."
     )
 
     if has_data(btc, ["OBV"]) and btc["OBV"].notna().sum() >= 2:
@@ -652,13 +659,14 @@ if "OBV" in show_panels:
         st.info("Not enough data for OBV.")
 
 # -----------------------------
-# MACD (toggle) ✅ UPDATED
+# MACD
 # -----------------------------
 if "MACD" in show_panels:
     st.subheader("📊 MACD (Moving Average Convergence Divergence)")
     st.caption(
-        "Compares two moving averages to show trend + momentum. "
-        "MACD crossing above the signal is often bullish; crossing below can be bearish."
+        "Shows trend direction and momentum by comparing two moving averages. "
+        "When MACD crosses above its signal line, momentum is turning bullish; "
+        "a cross below suggests weakening or bearish momentum."
     )
 
     if has_data(btc, ["MACD", "MACD_Signal", "MACD_Hist"]) and btc["MACD"].notna().sum() >= 2:
@@ -672,7 +680,7 @@ if "MACD" in show_panels:
         st.info("Not enough data for MACD.")
 
 # -----------------------------
-# AI Forecasts + Summary Panel (toggle) ✅ UPDATED
+# AI Forecasts + Summary Panel (interpretable + action hint)
 # -----------------------------
 if "AI Forecast" in show_panels:
     st.subheader("🤖 AI Forecasts")
@@ -689,6 +697,7 @@ if "AI Forecast" in show_panels:
         return max(lo, min(hi, x))
 
     def action_hint(bias_score, conf_score, agree, regime, flow, dist_pct):
+        # classify
         if bias_score >= 60:
             bias = "bull"
         elif bias_score <= 40:
@@ -756,20 +765,25 @@ if "AI Forecast" in show_panels:
 
         return headline, bullets, badge
 
+
     if has_data(btc, ["Close"]) and len(btc) >= 25:
+
         df = btc[["Close"]].dropna().copy()
         df["t"] = np.arange(len(df))
         X = df[["t"]]
         y = df["Close"]
 
+        # Fit models
         lr = LinearRegression().fit(X, y)
         rf = RandomForestRegressor(n_estimators=200, random_state=42).fit(X, y)
 
+        # Forecast horizon (future candles)
         steps = int(predict_steps)
         future_t = np.arange(len(df), len(df) + steps).reshape(-1, 1)
         lr_pred = lr.predict(future_t)
         rf_pred = rf.predict(future_t)
 
+        # Match spacing to selected timeframe
         if period == "1d":
             freq = "5min"
         elif period == "7d":
@@ -779,11 +793,13 @@ if "AI Forecast" in show_panels:
 
         future_dates = pd.date_range(df.index[-1], periods=steps + 1, freq=freq)[1:]
 
+        # Confidence band (LR residual std)
         residuals = (y - lr.predict(X)).to_numpy(dtype=float)
         resid_std = float(np.std(residuals)) if len(residuals) >= 3 else 0.0
         upper = lr_pred + resid_std
         lower = lr_pred - resid_std
 
+        # ---- Bias / confidence / agreement ----
         tail = max(10, min(50, steps))
         lr_slope = _trend_slope(lr_pred[-tail:])
         rf_slope = _trend_slope(rf_pred[-tail:])
@@ -830,9 +846,11 @@ if "AI Forecast" in show_panels:
             conf_label = f"Low ({conf_score:.0f}%)"
             conf_emoji = "🔴"
 
+        # Expected range (simple)
         exp_low = float(np.min(lower)) if len(lower) else np.nan
         exp_high = float(np.max(upper)) if len(upper) else np.nan
 
+        # Pull other dashboard context if available
         regime_val = regime if "regime" in locals() else "Unknown"
         flow_val = flow if "flow" in locals() else None
         dist_val = dist if "dist" in locals() else None
@@ -846,7 +864,11 @@ if "AI Forecast" in show_panels:
             dist_pct=dist_val
         )
 
+        # -----------------------------
+        # Render summary panel
+        # -----------------------------
         with st.expander("📌 AI Forecast Summary (how to read this)", expanded=True):
+
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Bias", bias_label)
             c2.metric("Confidence", f"{conf_emoji} {conf_label}")
@@ -868,6 +890,9 @@ if "AI Forecast" in show_panels:
                 st.markdown(f"- {bullet}")
             st.caption("Educational only — not financial advice.")
 
+        # -----------------------------
+        # Plot forecast (OUTSIDE expander)
+        # -----------------------------
         figa, axa = plt.subplots(figsize=(12, 4))
         axa.plot(df.index, df["Close"], label="Historical", linewidth=2)
         axa.plot(future_dates, lr_pred, label="Linear Regression")
