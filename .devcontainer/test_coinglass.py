@@ -1,4 +1,7 @@
+import requests
 import streamlit as st
+
+st.title("CoinGlass API Test")
 
 API_KEY = st.secrets["COINGLASS_API_KEY"]
 
@@ -9,7 +12,15 @@ headers = {
     "CG-API-KEY": API_KEY,
 }
 
-r = requests.get(url, headers=headers, timeout=15)
+try:
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=15,
+    )
 
-print("Status:", r.status_code)
-print(r.text)
+    st.write("Status:", response.status_code)
+    st.code(response.text[:3000])
+
+except Exception as error:
+    st.error(f"Request failed: {error}")
