@@ -1,6 +1,6 @@
-import requests
+import streamlit as st
 
-API_KEY = "65c076928f664c6b9c5d67f21d83aac0"
+API_KEY = st.secrets["COINGLASS_API_KEY"]
 
 url = "https://open-api-v4.coinglass.com/api/etf/bitcoin/flow-history"
 
