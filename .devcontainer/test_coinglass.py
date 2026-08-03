@@ -12,15 +12,14 @@ headers = {
     "CG-API-KEY": API_KEY,
 }
 
-try:
-    response = requests.get(
-        url,
-        headers=headers,
-        timeout=15,
-    )
+response = requests.get(url, headers=headers, timeout=15)
 
-    st.write("Status:", response.status_code)
-    st.code(response.text[:3000])
+st.write("Status:", response.status_code)
 
-except Exception as error:
-    st.error(f"Request failed: {error}")
+if response.status_code == 200:
+    data = response.json()
+    st.success("API connection successful!")
+    st.json(data)
+else:
+    st.error("API request failed")
+    st.code(response.text)
