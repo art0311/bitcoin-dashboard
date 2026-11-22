@@ -123,12 +123,15 @@ def run_backtest(raw, horizons=HORIZONS, min_train=180, max_tests=60):
                 detail.append({**base, 'Model': name,
                                'Predicted price': predicted_price,
                                'Predicted return %': forecast_return * 100.0})
-            # Lightweight directional benchmark: predict continuation of the last 7-day return.
-            # This is available at the forecast origin and requires no model fitting.
-            momentum_7d = float(data['Close'].iloc[i] / data['Close'].iloc[i-7] - 1)
+            # Horizon-aware momentum benchmark: convert the trailing 7-day
+            # gross return into an equivalent daily compounded growth factor,
+            # then project it over the selected h-day forecast horizon.
+            # Uses only prices observed at the origin; no model fitting.
+            trailing_7d_factor = float(current / data['Close'].iloc[i - 7])
+            momentum_return = trailing_7d_factor ** (h / 7.0) - 1.0
             detail.append({**base, 'Model': '7-day momentum benchmark',
-                           'Predicted price': current * (1 + momentum_7d),
-                           'Predicted return %': momentum_7d * 100.0})
+                           'Predicted price': current * (1.0 + momentum_return),
+                           'Predicted return %': momentum_return * 100.0})
             detail.append({**base, 'Model': 'No-change baseline',
                            'Predicted price': current, 'Predicted return %': 0.0})
     details = pd.DataFrame(detail)
