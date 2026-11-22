@@ -906,12 +906,13 @@ if "AI Forecast" in show_panels:
 
         # Phase 2: feature-based daily return forecasting and walk-forward evaluation.
         # Independent of the selected chart timeframe and existing experimental live forecast.
-        with st.expander("🧪 AI Forecast Performance & Backtesting — Phase 2", expanded=False):
+        with st.expander("🧪 AI Forecast Performance & Backtesting — Phase 2.1", expanded=False):
             st.caption(
                 "Daily BTC/ETH historical simulations (1, 7, 30, 60 days). "
                 "At each forecast date, models train only on outcomes already known. "
                 "Returns are predicted from lagged price, volatility, momentum and volume features. "
-                "These are NOT archived live predictions or calibrated probabilities."
+                "These are NOT archived live predictions or calibrated probabilities. "
+                "The momentum benchmark predicts continuation of the preceding 7-day price return."
             )
             from forecast_backtest import run_backtest
 
@@ -919,7 +920,7 @@ if "AI Forecast" in show_panels:
             def get_daily_backtest_data(asset):
                 return load_data(asset, "5y")
 
-            if st.button("Run Phase 2 historical backtest", key=f"backtest_{symbol}"):
+            if st.button("Run Phase 2.1 historical backtest", key=f"backtest_{symbol}"):
                 with st.spinner("Testing historical BTC/ETH forecasts..."):
                     daily_data = get_daily_backtest_data(symbol)
                     if daily_data.empty:
@@ -929,17 +930,55 @@ if "AI Forecast" in show_panels:
                         if scores.empty:
                             st.warning("Not enough daily history for this backtest.")
                         else:
-                            st.session_state[f"backtest_scores_v2_{symbol}"] = scores
-                            st.session_state[f"backtest_preds_v2_{symbol}"] = predictions
+                            st.session_state[f"backtest_scores_v21_{symbol}"] = scores
+                            st.session_state[f"backtest_preds_v21_{symbol}"] = predictions
 
-            scores = st.session_state.get(f"backtest_scores_v2_{symbol}")
-            predictions = st.session_state.get(f"backtest_preds_v2_{symbol}")
+            scores = st.session_state.get(f"backtest_scores_v21_{symbol}")
+            predictions = st.session_state.get(f"backtest_preds_v21_{symbol}")
             if scores is not None and not scores.empty and predictions is not None:
-                st.dataframe(scores, use_container_width=True, hide_index=True)
+                # Display-only improvements: no model refitting when switching charts or horizons.
+                def style_backtest_table(df):
+                    def error_style(value):
+                        try:
+                            number = float(str(value).split()[0])
+                        except (ValueError, TypeError, IndexError):
+                            return ""
+                        if number < -1e-9:
+                            return "color: #138a36; font-weight: bold"
+                        if number > 1e-9:
+                            return "color: #d94841; font-weight: bold"
+                        return ""
+
+                    def skill_style(value):
+                        try:
+                            number = float(str(value).replace('%', ''))
+                        except (ValueError, TypeError):
+                            return ""
+                        if number > 1e-9:
+                            return "color: #138a36; font-weight: bold"
+                        if number < -1e-9:
+                            return "color: #d94841; font-weight: bold"
+                        return ""
+
+                    return (df.style
+                            .map(error_style, subset=['Error vs baseline'])
+                            .map(skill_style, subset=['Model Skill']))
+
+                st.dataframe(style_backtest_table(scores), use_container_width=True, hide_index=True)
+                st.caption("**Model Skill:** percentage reduction in mean price error versus no-change "
+                           "(positive = better; negative = worse). **Error vs baseline:** difference "
+                           "in mean price error in percentage points (negative = better).")
+                horizon_counts = scores.groupby('Horizon')['Tests'].min().to_dict()
+                low_count = [f"{h}: {int(n)} tests" for h, n in horizon_counts.items() if int(n) < 30]
+                st.caption("Sample sizes: " + "; ".join(f"{h}: {int(n)} tests" for h, n in horizon_counts.items()))
+                if low_count:
+                    st.warning("Small historical sample: " + "; ".join(low_count) +
+                               ". Interpret directional accuracy cautiously.")
                 st.caption(
                     "Lower absolute price/return error is better. A negative error vs baseline is an improvement. "
                     "Direction accuracy measures "
-                    "up/down predictions; the no-change baseline makes no directional call. "
+                    "up/down predictions; the no-change baseline makes no directional call, "
+                    "while 7-day momentum supplies a simple directional benchmark. "
                     "Targets are spaced by horizon to avoid overlapping evaluation periods."
                 )
                 chosen_h = st.selectbox("Inspect forecast horizon (days)", [1, 7, 30, 60],
@@ -963,12 +1002,12 @@ if "AI Forecast" in show_panels:
                         actual = subset.drop_duplicates('Target date').set_index('Target date')
                         chart = chart.join(actual[['Actual price']]).sort_index()
                         st.line_chart(chart, use_container_width=True)
-                    st.download_button("Download Phase 2 predictions (CSV)",
+                    st.download_button("Download Phase 2.1 predictions (CSV)",
                                        predictions.to_csv(index=False).encode('utf-8'),
-                                       file_name=f"{ASSET_TICKER.lower()}_phase2_backtest.csv",
+                                       file_name=f"{ASSET_TICKER.lower()}_phase21_backtest.csv",
                                        mime='text/csv', key=f"backtest_download_{symbol}")
             else:
-                st.info("Click Run Phase 2 historical backtest to evaluate the models.")
+                st.info("Click Run Phase 2.1 historical backtest to evaluate the models.")
 
 
     else:
