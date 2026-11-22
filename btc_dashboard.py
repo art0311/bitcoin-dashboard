@@ -904,13 +904,51 @@ if "AI Forecast" in show_panels:
         axa.legend()
         st.pyplot(figa)
 
+        # Phase 1: independent, historical daily backtesting (not the live chart timeframe)
+        with st.expander("🧪 AI Forecast Performance & Backtesting", expanded=False):
+            st.caption("Out-of-sample, expanding-window tests. Each forecast is trained only "
+                       "on outcomes known at that date. These are historical simulations, "
+                       "not previously saved live predictions.")
+            from forecast_backtest import run_backtest
+
+            @st.cache_data(ttl=3600, show_spinner=False)
+            def get_daily_backtest_data(asset):
+                return load_data(asset, "5y")
+
+            if st.button("Run historical backtest", key=f"backtest_{symbol}"):
+                with st.spinner("Evaluating historical BTC/ETH forecasts..."):
+                    daily_data = get_daily_backtest_data(symbol)
+                    if daily_data.empty:
+                        st.error("Could not download daily history. Please retry later.")
+                    else:
+                        scores, predictions = run_backtest(daily_data)
+                        if scores.empty:
+                            st.warning("Not enough daily observations for a reliable backtest.")
+                        else:
+                            st.session_state[f"backtest_scores_{symbol}"] = scores
+                            st.session_state[f"backtest_preds_{symbol}"] = predictions
+            scores = st.session_state.get(f"backtest_scores_{symbol}")
+            predictions = st.session_state.get(f"backtest_preds_{symbol}")
+            if scores is not None and not scores.empty:
+                st.dataframe(scores, use_container_width=True, hide_index=True)
+                st.caption("Lower mean absolute price error is better. Direction accuracy "
+                           "measures up/down calls; the no-change baseline makes no directional call. "
+                           "Overlapping target periods are avoided by spacing test origins by horizon.")
+                chosen_h = st.selectbox("Inspect forecast horizon", [1, 7, 30, 60],
+                                        key=f"backtest_horizon_{symbol}")
+                subset = predictions[predictions['Horizon'] == chosen_h]
+                if not subset.empty:
+                    st.line_chart(subset.pivot(index='Target date', columns='Model',
+                                               values='Predicted price').join(
+                        subset.drop_duplicates('Target date').set_index('Target date')
+                              [['Actual price']]), use_container_width=True)
+                    st.download_button("Download backtest predictions (CSV)",
+                                       predictions.to_csv(index=False).encode('utf-8'),
+                                       file_name=f"{ASSET_TICKER.lower()}_backtest.csv",
+                                       mime='text/csv', key=f"backtest_download_{symbol}")
+            else:
+                st.info("Click Run historical backtest to evaluate 1, 7, 30 and 60-day forecasts.")
+
+
     else:
         st.info("Not enough data for AI predictions yet (need ~25+ data points).")
-
-                                                                          
-
-
-
-
-
-
