@@ -904,50 +904,71 @@ if "AI Forecast" in show_panels:
         axa.legend()
         st.pyplot(figa)
 
-        # Phase 1: independent, historical daily backtesting (not the live chart timeframe)
-        with st.expander("🧪 AI Forecast Performance & Backtesting", expanded=False):
-            st.caption("Out-of-sample, expanding-window tests. Each forecast is trained only "
-                       "on outcomes known at that date. These are historical simulations, "
-                       "not previously saved live predictions.")
+        # Phase 2: feature-based daily return forecasting and walk-forward evaluation.
+        # Independent of the selected chart timeframe and existing experimental live forecast.
+        with st.expander("🧪 AI Forecast Performance & Backtesting — Phase 2", expanded=False):
+            st.caption(
+                "Daily BTC/ETH historical simulations (1, 7, 30, 60 days). "
+                "At each forecast date, models train only on outcomes already known. "
+                "Returns are predicted from lagged price, volatility, momentum and volume features. "
+                "These are NOT archived live predictions or calibrated probabilities."
+            )
             from forecast_backtest import run_backtest
 
             @st.cache_data(ttl=3600, show_spinner=False)
             def get_daily_backtest_data(asset):
                 return load_data(asset, "5y")
 
-            if st.button("Run historical backtest", key=f"backtest_{symbol}"):
-                with st.spinner("Evaluating historical BTC/ETH forecasts..."):
+            if st.button("Run Phase 2 historical backtest", key=f"backtest_{symbol}"):
+                with st.spinner("Testing historical BTC/ETH forecasts..."):
                     daily_data = get_daily_backtest_data(symbol)
                     if daily_data.empty:
-                        st.error("Could not download daily history. Please retry later.")
+                        st.error("Could not download daily history. Try again later.")
                     else:
                         scores, predictions = run_backtest(daily_data)
                         if scores.empty:
-                            st.warning("Not enough daily observations for a reliable backtest.")
+                            st.warning("Not enough daily history for this backtest.")
                         else:
-                            st.session_state[f"backtest_scores_{symbol}"] = scores
-                            st.session_state[f"backtest_preds_{symbol}"] = predictions
-            scores = st.session_state.get(f"backtest_scores_{symbol}")
-            predictions = st.session_state.get(f"backtest_preds_{symbol}")
-            if scores is not None and not scores.empty:
+                            st.session_state[f"backtest_scores_v2_{symbol}"] = scores
+                            st.session_state[f"backtest_preds_v2_{symbol}"] = predictions
+
+            scores = st.session_state.get(f"backtest_scores_v2_{symbol}")
+            predictions = st.session_state.get(f"backtest_preds_v2_{symbol}")
+            if scores is not None and not scores.empty and predictions is not None:
                 st.dataframe(scores, use_container_width=True, hide_index=True)
-                st.caption("Lower mean absolute price error is better. Direction accuracy "
-                           "measures up/down calls; the no-change baseline makes no directional call. "
-                           "Overlapping target periods are avoided by spacing test origins by horizon.")
-                chosen_h = st.selectbox("Inspect forecast horizon", [1, 7, 30, 60],
+                st.caption(
+                    "Lower absolute price/return error is better. A negative error vs baseline is an improvement. "
+                    "Direction accuracy measures "
+                    "up/down predictions; the no-change baseline makes no directional call. "
+                    "Targets are spaced by horizon to avoid overlapping evaluation periods."
+                )
+                chosen_h = st.selectbox("Inspect forecast horizon (days)", [1, 7, 30, 60],
                                         key=f"backtest_horizon_{symbol}")
-                subset = predictions[predictions['Horizon'] == chosen_h]
+                subset = predictions[predictions['Horizon'] == chosen_h].copy()
                 if not subset.empty:
-                    st.line_chart(subset.pivot(index='Target date', columns='Model',
-                                               values='Predicted price').join(
-                        subset.drop_duplicates('Target date').set_index('Target date')
-                              [['Actual price']]), use_container_width=True)
-                    st.download_button("Download backtest predictions (CSV)",
+                    view = st.radio("Backtest chart", ["Predicted vs actual returns (%)",
+                                                       "Predicted vs actual prices ($)"],
+                                    horizontal=True, key=f"backtest_view_{symbol}")
+                    if view == "Predicted vs actual returns (%)":
+                        chart = subset.pivot(index='Target date', columns='Model',
+                                             values='Predicted return %')
+                        actual = subset.drop_duplicates('Target date').set_index('Target date')
+                        chart = chart.join(actual[['Actual return %']]).sort_index()
+                        st.line_chart(chart, use_container_width=True)
+                        st.caption("Model returns are compared with actual BTC/ETH returns at "
+                                   "the same target dates. A zero return is the no-change baseline.")
+                    else:
+                        chart = subset.pivot(index='Target date', columns='Model',
+                                             values='Predicted price')
+                        actual = subset.drop_duplicates('Target date').set_index('Target date')
+                        chart = chart.join(actual[['Actual price']]).sort_index()
+                        st.line_chart(chart, use_container_width=True)
+                    st.download_button("Download Phase 2 predictions (CSV)",
                                        predictions.to_csv(index=False).encode('utf-8'),
-                                       file_name=f"{ASSET_TICKER.lower()}_backtest.csv",
+                                       file_name=f"{ASSET_TICKER.lower()}_phase2_backtest.csv",
                                        mime='text/csv', key=f"backtest_download_{symbol}")
             else:
-                st.info("Click Run historical backtest to evaluate 1, 7, 30 and 60-day forecasts.")
+                st.info("Click Run Phase 2 historical backtest to evaluate the models.")
 
 
     else:
