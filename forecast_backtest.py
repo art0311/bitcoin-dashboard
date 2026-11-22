@@ -1,4 +1,4 @@
-"""Phase 2: leakage-aware BTC/ETH daily-return forecasting and walk-forward evaluation.
+"""Phase 2.1: leakage-aware BTC/ETH daily-return forecasting and walk-forward evaluation.
 
 This module is independent of Streamlit. It makes no API calls and writes no files.
 Training at origin i includes only labels whose target date is <= origin i.
@@ -123,6 +123,12 @@ def run_backtest(raw, horizons=HORIZONS, min_train=180, max_tests=60):
                 detail.append({**base, 'Model': name,
                                'Predicted price': predicted_price,
                                'Predicted return %': forecast_return * 100.0})
+            # Lightweight directional benchmark: predict continuation of the last 7-day return.
+            # This is available at the forecast origin and requires no model fitting.
+            momentum_7d = float(data['Close'].iloc[i] / data['Close'].iloc[i-7] - 1)
+            detail.append({**base, 'Model': '7-day momentum benchmark',
+                           'Predicted price': current * (1 + momentum_7d),
+                           'Predicted return %': momentum_7d * 100.0})
             detail.append({**base, 'Model': 'No-change baseline',
                            'Predicted price': current, 'Predicted return %': 0.0})
     details = pd.DataFrame(detail)
@@ -144,12 +150,17 @@ def run_backtest(raw, horizons=HORIZONS, min_train=180, max_tests=60):
         direction = group['Direction correct'].dropna()
         baseline_error = baseline_by_horizon.get(h, np.nan)
         model_error = group['Absolute error %'].mean()
+        # Positive skill means lower price error than the no-change baseline.
+        skill = (100.0 * (baseline_error - model_error) / baseline_error
+                 if np.isfinite(baseline_error) and baseline_error > 0 else np.nan)
         summary.append({
             'Horizon': f'{h}d', 'Model': model, 'Tests': len(group),
             'Mean abs. price error': f"{group['Absolute error %'].mean():.2f}%",
             'Mean abs. return error': f"{group['Return error (pp)'].mean():.2f} pp",
             'Error vs baseline': (f'{model_error - baseline_error:+.2f} pp'
                                   if model != 'No-change baseline' else '—'),
+            'Model Skill': (f'{skill:+.1f}%' if model != 'No-change baseline'
+                            and np.isfinite(skill) else ('0.0%' if model == 'No-change baseline' else 'N/A')),
             'Direction accuracy': (f'{100 * direction.astype(float).mean():.1f}%'
                                    if len(direction) else 'N/A'),
         })
