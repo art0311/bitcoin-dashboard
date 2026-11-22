@@ -871,7 +871,7 @@ if "AI Forecast" in show_panels:
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Bias", bias_label)
-            c2.metric("Confidence", f"{conf_emoji} {conf_label}")
+            c2.metric("Heuristic confidence", f"{conf_emoji} {conf_label}")
             c3.metric("Model Agreement", agreement_label)
             c4.metric("Horizon", f"{steps} steps ({freq})")
 
@@ -888,7 +888,10 @@ if "AI Forecast" in show_panels:
             st.markdown(f"**{hint_headline}**")
             for bullet in hint_bullets:
                 st.markdown(f"- {bullet}")
-            st.caption("Educational only — not financial advice.")
+            st.caption("Live confidence is a heuristic score, not a validated probability. "
+                       "The live forecast above uses different models from the historical "
+                       "backtest below; backtest scores do not validate these live signals. "
+                       "Educational only — not financial advice.")
 
         # -----------------------------
         # Plot forecast (OUTSIDE expander)
@@ -906,13 +909,14 @@ if "AI Forecast" in show_panels:
 
         # Phase 2: feature-based daily return forecasting and walk-forward evaluation.
         # Independent of the selected chart timeframe and existing experimental live forecast.
-        with st.expander("🧪 AI Forecast Performance & Backtesting — Phase 2.1", expanded=False):
+        with st.expander("🧪 AI Forecast Performance & Backtesting — Phase 3", expanded=False):
             st.caption(
                 "Daily BTC/ETH historical simulations (1, 7, 30, 60 days). "
                 "At each forecast date, models train only on outcomes already known. "
                 "Returns are predicted from lagged price, volatility, momentum and volume features. "
                 "These are NOT archived live predictions or calibrated probabilities. "
-                "The momentum benchmark predicts continuation of the preceding 7-day price return."
+                "The momentum benchmark projects the preceding 7-day trend at a daily compounded rate. "
+                "The live forecast above uses separate models and is not validated by these tests."
             )
             from forecast_backtest import run_backtest
 
@@ -920,7 +924,7 @@ if "AI Forecast" in show_panels:
             def get_daily_backtest_data(asset):
                 return load_data(asset, "5y")
 
-            if st.button("Run Phase 2.1 historical backtest", key=f"backtest_{symbol}"):
+            if st.button("Run Phase 3 historical backtest", key=f"backtest_{symbol}"):
                 with st.spinner("Testing historical BTC/ETH forecasts..."):
                     daily_data = get_daily_backtest_data(symbol)
                     if daily_data.empty:
@@ -930,11 +934,11 @@ if "AI Forecast" in show_panels:
                         if scores.empty:
                             st.warning("Not enough daily history for this backtest.")
                         else:
-                            st.session_state[f"backtest_scores_v21_{symbol}"] = scores
-                            st.session_state[f"backtest_preds_v21_{symbol}"] = predictions
+                            st.session_state[f"backtest_scores_v3_{symbol}"] = scores
+                            st.session_state[f"backtest_preds_v3_{symbol}"] = predictions
 
-            scores = st.session_state.get(f"backtest_scores_v21_{symbol}")
-            predictions = st.session_state.get(f"backtest_preds_v21_{symbol}")
+            scores = st.session_state.get(f"backtest_scores_v3_{symbol}")
+            predictions = st.session_state.get(f"backtest_preds_v3_{symbol}")
             if scores is not None and not scores.empty and predictions is not None:
                 # Display-only improvements: no model refitting when switching charts or horizons.
                 def style_backtest_table(df):
@@ -981,6 +985,90 @@ if "AI Forecast" in show_panels:
                     "while 7-day momentum supplies a simple directional benchmark. "
                     "Targets are spaced by horizon to avoid overlapping evaluation periods."
                 )
+                # Phase 3: diagnostics reuse completed predictions; no extra model fitting.
+                # Regimes depend only on the trailing 30-day return at forecast time.
+                with st.expander("🔎 Phase 3: When do predictions work?", expanded=False):
+                    st.caption(
+                        "**Regime at prediction date:** Bull = previous 30-day return above +10%; "
+                        "Bear = below −10%; otherwise Sideways / transition. "
+                        "These thresholds are simple historical labels, not a forecast of the next regime."
+                    )
+                    diag_h = st.selectbox("Diagnostic forecast horizon", [1, 7, 30, 60],
+                                          index=1, key=f"regime_horizon_{symbol}")
+                    dsub = predictions[predictions['Horizon'] == diag_h].copy()
+                    baseline_d = (dsub[dsub['Model'] == 'No-change baseline']
+                                  .set_index('Forecast date')['Absolute error %'])
+                    dsub['Baseline error %'] = dsub['Forecast date'].map(baseline_d)
+                    regime_rows = []
+                    for (regime_name, model_name), group in dsub.groupby(['Market regime', 'Model'], sort=True):
+                        n = len(group)
+                        mae = float(group['Absolute error %'].mean())
+                        base_mae = float(group['Baseline error %'].mean())
+                        skill = 100 * (1 - mae / base_mae) if base_mae > 0 else float('nan')
+                        directional = group['Direction correct'].dropna()
+                        regime_rows.append({
+                            'Market regime': regime_name, 'Model': model_name, 'Tests': n,
+                            'Price error': f'{mae:.2f}%',
+                            'Model Skill': f'{skill:+.1f}%' if np.isfinite(skill) else 'N/A',
+                            'Direction correct': (
+                                f'{100 * directional.astype(float).mean():.1f}%'
+                                if len(directional) else 'N/A'),
+                        })
+                    regime_df = pd.DataFrame(regime_rows)
+                    if not regime_df.empty:
+                        st.dataframe(regime_df, use_container_width=True, hide_index=True)
+                        if (regime_df['Tests'] < 15).any():
+                            st.warning('Some regimes have fewer than 15 forecasts. Their results are highly uncertain.')
+
+                    st.markdown('**Historical stability: earlier tests vs more recent tests**')
+                    st.caption(
+                        "Splits the already-completed forecasts into two chronological halves. "
+                        "This helps reveal whether a result depends on one market period."
+                    )
+                    stability = []
+                    for model_name, group in dsub.groupby('Model', sort=True):
+                        group = group.sort_values('Forecast date')
+                        midpoint = len(group) // 2
+                        for period_name, part in [('Earlier', group.iloc[:midpoint]),
+                                                  ('Recent', group.iloc[midpoint:])]:
+                            if part.empty:
+                                continue
+                            model_err = float(part['Absolute error %'].mean())
+                            base_err = float(part['Baseline error %'].mean())
+                            model_skill = (100 * (1 - model_err / base_err)
+                                           if base_err > 0 else float('nan'))
+                            stability.append({
+                                'Model': model_name, 'Period': period_name,
+                                'Tests': len(part), 'Price error': f'{model_err:.2f}%',
+                                'Model Skill': (f'{model_skill:+.1f}%'
+                                                if np.isfinite(model_skill) else 'N/A'),
+                            })
+                    if stability:
+                        st.dataframe(pd.DataFrame(stability), use_container_width=True,
+                                     hide_index=True)
+                    st.caption(
+                        "**Historical error sizes (not a future confidence interval):** "
+                        "For each model, the table below gives the median and 80th-percentile "
+                        "absolute return error across these completed tests. "
+                        "Past performance does not guarantee future coverage."
+                    )
+                    error_rows = []
+                    for model_name, group in dsub.groupby('Model', sort=True):
+                        if model_name == 'No-change baseline':
+                            continue
+                        errors = group['Return error (pp)'].dropna()
+                        if errors.empty:
+                            continue
+                        error_rows.append({
+                            'Model': model_name, 'Tests': len(errors),
+                            'Median absolute return error': f'{errors.quantile(0.5):.2f} pp',
+                            '80th-percentile absolute error': f'{errors.quantile(0.8):.2f} pp',
+                        })
+                    if error_rows:
+                        st.dataframe(pd.DataFrame(error_rows), use_container_width=True,
+                                     hide_index=True)
+                    st.caption('No new regressors are trained to generate these diagnostics.')
+
                 chosen_h = st.selectbox("Inspect forecast horizon (days)", [1, 7, 30, 60],
                                         key=f"backtest_horizon_{symbol}")
                 subset = predictions[predictions['Horizon'] == chosen_h].copy()
@@ -1002,13 +1090,16 @@ if "AI Forecast" in show_panels:
                         actual = subset.drop_duplicates('Target date').set_index('Target date')
                         chart = chart.join(actual[['Actual price']]).sort_index()
                         st.line_chart(chart, use_container_width=True)
-                    st.download_button("Download Phase 2.1 predictions (CSV)",
+                    st.download_button("Download Phase 3 predictions (CSV)",
                                        predictions.to_csv(index=False).encode('utf-8'),
-                                       file_name=f"{ASSET_TICKER.lower()}_phase21_backtest.csv",
+                                       file_name=f"{ASSET_TICKER.lower()}_phase3_backtest.csv",
                                        mime='text/csv', key=f"backtest_download_{symbol}")
             else:
-                st.info("Click Run Phase 2.1 historical backtest to evaluate the models.")
+                st.info("Click Run Phase 3 historical backtest to evaluate the models.")
 
 
     else:
         st.info("Not enough data for AI predictions yet (need ~25+ data points).")
+
+
+
