@@ -1,4 +1,4 @@
-"""Phase 2.1: leakage-aware BTC/ETH daily-return forecasting and walk-forward evaluation.
+"""Phase 3: leakage-aware BTC/ETH daily-return forecasting and walk-forward evaluation.
 
 This module is independent of Streamlit. It makes no API calls and writes no files.
 Training at origin i includes only labels whose target date is <= origin i.
@@ -55,6 +55,13 @@ def feature_frame(raw):
     out['macd_hist'] = (macd - signal) / close
     out['range_1'] = (df['High'] - df['Low']) / close
     out['volume_change_7'] = volume / volume.shift(7).replace(0, np.nan) - 1
+    # Regime is computed from trailing information only (no future leakage).
+    # A simple 30-day trend classification, independent of the models.
+    trend30 = close.pct_change(30, fill_method=None)
+    out['Market regime'] = np.select(
+        [trend30 > 0.10, trend30 < -0.10],
+        ['Bull', 'Bear'], default='Sideways / transition'
+    )
     out['Close'] = close
     return out.replace([np.inf, -np.inf], np.nan)
 
@@ -112,6 +119,7 @@ def run_backtest(raw, horizons=HORIZONS, min_train=180, max_tests=60):
                 'Current price': current,
                 'Actual price': actual,
                 'Actual return %': actual_return,
+                'Market regime': str(data['Market regime'].iloc[i]),
             }
             for name, model in _models().items():
                 model.fit(train[list(FEATURES)], train['target'])
@@ -140,6 +148,8 @@ def run_backtest(raw, horizons=HORIZONS, min_train=180, max_tests=60):
     details['Absolute error %'] = (100 * (details['Predicted price'] - details['Actual price']).abs()
                                    / details['Actual price'])
     details['Return error (pp)'] = (details['Predicted return %'] - details['Actual return %']).abs()
+    details['Abs price error ($)'] = (details['Predicted price'] - details['Actual price']).abs()
+    details['Signed return error (pp)'] = (details['Predicted return %'] - details['Actual return %'])
     details['Direction correct'] = (np.sign(details['Predicted return %']) ==
                                     np.sign(details['Actual return %']))
     details['Direction correct'] = details['Direction correct'].astype(object)
