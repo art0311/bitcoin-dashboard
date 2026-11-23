@@ -1,36 +1,20 @@
-
+"""Read-only database connection test page for the Streamlit dev app."""
 import streamlit as st
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+
+from forecast_storage import StorageError, list_forecasts
 
 st.title("Database Connection Test")
-
-st.write("Checking the connection to Supabase...")
+st.caption("Read-only check. This page cannot save, change, or delete forecasts.")
 
 try:
-    url = st.secrets["SUPABASE_URL"].rstrip("/")
-    key = st.secrets["SUPABASE_KEY"]
-
-    request = Request(
-        f"{url}/rest/v1/forecast_predictions?select=id&limit=1",
-        headers={
-            "apikey": key,
-            "Accept": "application/json",
-        },
-    )
-
-    with urlopen(request, timeout=15) as response:
-        if response.status == 200:
-            st.success("Supabase connection successful!")
-            st.info("Forecast history table is accessible.")
-        else:
-            st.error(f"Unexpected response: {response.status}")
-
-except KeyError:
-    st.error("Supabase credentials are missing from Streamlit Secrets.")
-except HTTPError as error:
-    st.error(f"Database request failed: HTTP {error.code}")
-except URLError:
-    st.error("Could not reach the Supabase server.")
+    records = list_forecasts(st.secrets, limit=1)
+    st.success("Supabase connection successful!")
+    st.info("Forecast history table is accessible.")
+    if records:
+        st.success("At least one forecast record is stored and readable.")
+    else:
+        st.warning("The connection works, but the forecast table is currently empty.")
+except StorageError as exc:
+    st.error(str(exc))
 except Exception:
-    st.error("Database connection test failed.")
+    st.error("Connection test failed. Check app logs for configuration issues; do not share secret keys.")
