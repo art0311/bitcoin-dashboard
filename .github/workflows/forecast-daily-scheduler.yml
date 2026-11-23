@@ -1,0 +1,111 @@
+name: BTC ETH Forecast - Daily Scheduler
+
+# Put this workflow file ONLY on the default branch (main).
+# Its job explicitly checks out the tested development branch, so it does NOT
+# replace or deploy the production Streamlit dashboard.
+# GitHub schedules can be delayed or occasionally skipped.
+on:
+  schedule:
+    # UTC: primary run and a four-hour-later recovery run.
+    # We avoid minute 0, which is a busier period for Actions runners.
+    - cron: '23 2 * * *'
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Manual test mode (dry_run does not write; save writes to Supabase)'
+        required: true
+        type: choice
+        default: dry_run
+        options:
+          - dry_run
+          - save
+
+permissions:
+  contents: read
+
+# Prevent two runs from racing to record the same forecast or actual outcome.
+concurrency:
+  group: btc-eth-daily-recording
+  cancel-in-progress: false
+
+jobs:
+  forecast-and-evaluate:
+    name: Record forecasts and check matured outcomes
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # Scheduled runs save; manually triggered runs default to read-only.
+      SAVE_MODE: ${{ github.event_name == 'schedule' || inputs.mode == 'save' }}
+
+    steps:
+      - name: Check out tested development forecasting code
+        uses: actions/checkout@v4
+        with:
+          ref: feature/coinglass-api
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check pandas numpy scikit-learn yfinance
+
+      - name: Check source code
+        run: python -m py_compile daily_forecast_job.py forecast_backtest.py forecast_storage.py evaluate_forecasts.py
+
+      - name: Confirm Supabase credentials
+        shell: bash
+        run: |
+          test -n "$SUPABASE_URL" || { echo 'Missing SUPABASE_URL'; exit 1; }
+          test -n "$SUPABASE_KEY" || { echo 'Missing SUPABASE_KEY'; exit 1; }
+          echo 'Supabase credentials are configured (values hidden).'
+
+      - name: Generate forecasts and evaluate matured predictions
+        shell: bash
+        run: |
+          set +e
+          if [[ "$SAVE_MODE" == 'true' ]]; then
+            echo 'MODE: save forecasts and mature outcomes to Supabase'
+            mode_flag='--save'
+          else
+            echo 'MODE: dry run; no Supabase data changes'
+            mode_flag=''
+          fi
+
+          run_with_retry() {
+            local label="$1"; shift
+            local attempt
+            for attempt in 1 2; do
+              echo "--- $label (attempt $attempt of 2) ---"
+              "$@"
+              local rc=$?
+              if [[ "$rc" -eq 0 ]]; then
+                return 0
+              fi
+              if [[ "$attempt" -eq 1 ]]; then
+                echo "$label failed (exit $rc); retrying after 90 seconds"
+                sleep 90
+              else
+                echo "ERROR: $label failed twice (last exit $rc)"
+              fi
+            done
+            return 1
+          }
+
+          # Always attempt evaluation even if new forecasts could not be issued.
+          # Matured rows remain pending until a later successful evaluation.
+          run_with_retry 'Forecast recording' python daily_forecast_job.py --asset both $mode_flag
+          forecast_rc=$?
+          run_with_retry 'Matured forecast evaluation' python evaluate_forecasts.py $mode_flag
+          evaluation_rc=$?
+
+          if [[ "$forecast_rc" -ne 0 || "$evaluation_rc" -ne 0 ]]; then
+            echo 'At least one operation failed. The next scheduled run will retry.'
+            exit 1
+          fi
+          echo 'Daily pipeline completed. Duplicate forecasts and already-evaluated rows are skipped.'
