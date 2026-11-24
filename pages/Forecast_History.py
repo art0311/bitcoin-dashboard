@@ -1,85 +1,110 @@
-"""Read-only forecast history for the BTC/ETH Streamlit development dashboard.
+"""Read-only BTC/ETH forecast history and model performance.
 
-All writes happen in trusted GitHub Actions jobs, never in this public page.
-Keep SUPABASE_URL and SUPABASE_KEY in Streamlit Secrets only.
+Writes are exclusively performed by trusted GitHub Actions jobs. Supabase
+credentials stay in Streamlit Secrets. No model training occurs on this page.
 """
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
-
 from forecast_storage import StorageError, list_forecasts
 
 st.set_page_config(page_title="AI Forecast History", layout="wide")
 st.title("📚 AI Forecast History")
-st.caption(
-    "Real predictions recorded before their outcomes were known. "
-    "All dates use UTC. Models are experimental, not validated trading signals."
-)
+st.caption("Recorded live predictions and their subsequent outcomes. Dates use UTC; models are experimental, not validated trading signals.")
 
+PAGE_SIZE = 500
+MAX_ROWS = 20000
+MODEL_ORDER = {
+    "Ridge Regression": 0,
+    "Random Forest": 1,
+    "7-day momentum benchmark": 2,
+    "No-change baseline": 3,
+}
+SORT_OPTIONS = [
+    "Newest issue date (BTC → ETH, 1d → 60d)",
+    "Oldest issue date",
+    "Forecast horizon (1d → 60d)",
+    "Target date (soonest first)",
+    "Highest prediction error (evaluated first)",
+]
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_history() -> list[dict]:
-    # The existing storage API supports at most 500 recent records per request.
-    # Do not imply this is a complete lifetime history once that limit is reached.
-    return list_forecasts(st.secrets, limit=500)
+def load_history() -> tuple[list[dict], bool]:
+    records = []
+    for offset in range(0, MAX_ROWS, PAGE_SIZE):
+        batch = list_forecasts(st.secrets, limit=PAGE_SIZE, offset=offset)
+        records.extend(batch)
+        if len(batch) < PAGE_SIZE:
+            return records, False
+    # An entire additional page might exist. Don't claim completeness at cap.
+    return records, True
 
 
 def to_dataframe(records: list[dict]) -> pd.DataFrame:
-    frame = pd.DataFrame.from_records(records)
-    for col in ("forecast_date", "target_date", "evaluated_at"):
-        frame[col] = pd.to_datetime(frame[col], utc=True, errors="coerce")
-    for col in ("starting_price", "predicted_price", "actual_price"):
-        frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    frame["horizon_days"] = pd.to_numeric(frame["horizon_days"], errors="coerce")
-    frame["status"] = frame["actual_price"].notna().map({True: "Evaluated", False: "Pending"})
-    valid = (frame["starting_price"] > 0) & (frame["actual_price"] > 0)
-    frame["actual_move_pct"] = ((frame["actual_price"] / frame["starting_price"]) - 1) * 100
-    frame["predicted_move_pct"] = ((frame["predicted_price"] / frame["starting_price"]) - 1) * 100
-    frame["price_error_pct"] = ((frame["predicted_price"] - frame["actual_price"]).abs() / frame["actual_price"]) * 100
-    frame.loc[~valid, "price_error_pct"] = float("nan")
-    frame["direction_correct"] = pd.NA
-    directional = valid & frame["model"].ne("No-change baseline")
-    # Zero-valued predicted moves represent no directional call.
-    directional &= frame["predicted_move_pct"].ne(0)
-    frame.loc[directional, "direction_correct"] = (
-        (frame.loc[directional, "predicted_move_pct"] > 0)
-        == (frame.loc[directional, "actual_move_pct"] > 0)
+    df = pd.DataFrame.from_records(records)
+    for c in ("forecast_date", "target_date", "evaluated_at"):
+        df[c] = pd.to_datetime(df[c], utc=True, errors="coerce")
+    for c in ("starting_price", "predicted_price", "actual_price", "horizon_days"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["status"] = df["actual_price"].notna().map({True: "Evaluated", False: "Pending"})
+    valid = (df["starting_price"] > 0) & (df["actual_price"] > 0)
+    df["actual_move_pct"] = (df["actual_price"] / df["starting_price"] - 1) * 100
+    df["predicted_move_pct"] = (df["predicted_price"] / df["starting_price"] - 1) * 100
+    df["price_error_pct"] = ((df["predicted_price"] - df["actual_price"]).abs() / df["actual_price"]) * 100
+    df.loc[~valid, "price_error_pct"] = float("nan")
+    df["direction_correct"] = pd.NA
+    directional = valid & df["model"].ne("No-change baseline") & df["predicted_move_pct"].ne(0)
+    df.loc[directional, "direction_correct"] = (
+        (df.loc[directional, "predicted_move_pct"] > 0)
+        == (df.loc[directional, "actual_move_pct"] > 0)
     ).astype(bool)
-    return frame
+    df["model_rank"] = df["model"].map(MODEL_ORDER).fillna(99).astype(int)
+    df["asset_rank"] = df["asset"].map({"BTC": 0, "ETH": 1}).fillna(99).astype(int)
+    df["issue_day"] = df["forecast_date"].dt.floor("D")
+    return df
 
+
+def sort_forecasts(df: pd.DataFrame, choice: str) -> pd.DataFrame:
+    # Using daily UTC grouping means different models issued seconds apart stay together.
+    if choice == SORT_OPTIONS[1]:
+        keys, asc = ["issue_day", "asset_rank", "horizon_days", "model_rank", "forecast_date"], [True, True, True, True, True]
+    elif choice == SORT_OPTIONS[2]:
+        keys, asc = ["horizon_days", "issue_day", "asset_rank", "model_rank"], [True, False, True, True]
+    elif choice == SORT_OPTIONS[3]:
+        keys, asc = ["target_date", "asset_rank", "horizon_days", "model_rank"], [True, True, True, True]
+    elif choice == SORT_OPTIONS[4]:
+        # NaNs (pending forecasts) are always last, not treated as zero error.
+        keys, asc = ["price_error_pct", "issue_day", "asset_rank", "model_rank"], [False, False, True, True]
+    else:
+        keys, asc = ["issue_day", "asset_rank", "horizon_days", "model_rank", "forecast_date"], [False, True, True, True, False]
+    return df.sort_values(keys, ascending=asc, na_position="last", kind="stable")
 
 try:
-    rows = load_history()
+    records, capped = load_history()
 except StorageError:
-    st.error("Couldn't retrieve forecasts from Supabase. Check the app configuration or retry later.")
+    st.error("Couldn't retrieve forecasts from Supabase. Check app configuration and retry.")
     st.stop()
 except Exception:
-    st.error("Forecast history is temporarily unavailable. Please check the Streamlit app logs.")
+    st.error("Forecast history temporarily unavailable. Check Streamlit app logs.")
     st.stop()
 
-if not rows:
-    st.info("No saved forecasts yet. The scheduled forecasting job will add them here.")
+if not records:
+    st.info("No saved forecasts yet. The scheduled job will add them here.")
     st.stop()
 
-frame = to_dataframe(rows)
-if len(rows) == 500:
-    st.warning(
-        "Showing only the 500 most recently recorded forecasts. "
-        "Historical totals and accuracy on this page exclude older records. "
-        "We'll add paginated database queries before the history grows beyond this limit."
-    )
+frame = to_dataframe(records)
+if capped:
+    st.warning(f"Showing at most {MAX_ROWS:,} recent records; counts and performance may exclude older forecasts.")
 
 st.subheader("Choose what to inspect")
-f1, f2, f3 = st.columns(3)
-with f1:
+c1, c2, c3 = st.columns(3)
+with c1:
     asset = st.selectbox("Asset", ["All", "BTC", "ETH"])
-with f2:
-    horizons = ["All", "1", "7", "30", "60"]
-    horizon = st.selectbox("Forecast horizon (days)", horizons)
-with f3:
+with c2:
+    horizon = st.selectbox("Forecast horizon (days)", ["All", "1", "7", "30", "60"])
+with c3:
     status = st.selectbox("Forecast status", ["All", "Pending", "Evaluated"])
-
 filtered = frame.copy()
 if asset != "All":
     filtered = filtered.loc[filtered["asset"] == asset]
@@ -89,91 +114,64 @@ if status != "All":
     filtered = filtered.loc[filtered["status"] == status]
 
 completed = filtered.loc[filtered["actual_price"].notna()].copy()
-model_completed = completed.loc[completed["model"].ne("No-change baseline")]
-valid_direction = model_completed.loc[model_completed["direction_correct"].notna()]
-
+scored = completed.loc[completed["direction_correct"].notna()]
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Stored forecasts", f"{len(filtered):,}")
 m2.metric("Awaiting outcomes", f"{int(filtered['actual_price'].isna().sum()):,}")
 m3.metric("Evaluated", f"{len(completed):,}")
-if valid_direction.empty:
-    m4.metric("Correct direction", "Not available")
-else:
-    m4.metric("Correct direction", f"{100 * valid_direction['direction_correct'].astype(float).mean():.1f}%")
-st.caption(
-    "One forecast row represents one model for one asset and horizon. "
-    "The directional metric combines eligible model predictions from the current filters; "
-    "it excludes the no-change baseline. Small samples are unreliable."
-)
+m4.metric("Correct direction", "Not available" if scored.empty else f"{scored['direction_correct'].astype(float).mean()*100:.1f}%")
+st.caption("Each row is one model/asset/horizon prediction. Accuracy is based on evaluated records; multiple models and overlapping forecast targets are not independent tests.")
 
 st.subheader("Recorded forecasts")
+sort_by = st.selectbox("Sort by", SORT_OPTIONS, index=0)
 if filtered.empty:
-    st.info("No records match the selected filters.")
+    st.info("No records match these filters.")
 else:
-    display = filtered.sort_values("forecast_date", ascending=False).copy()
+    display = sort_forecasts(filtered, sort_by).copy()
     display["Issued (UTC)"] = display["forecast_date"].dt.strftime("%Y-%m-%d %H:%M")
     display["Target (UTC)"] = display["target_date"].dt.strftime("%Y-%m-%d")
-    display["Evaluated at (UTC)"] = display["evaluated_at"].dt.strftime("%Y-%m-%d %H:%M")
     display["Horizon"] = display["horizon_days"].map(lambda v: f"{int(v)}d" if pd.notna(v) else "—")
     display = display.rename(columns={
         "asset": "Asset", "model": "Model", "model_version": "Version",
         "starting_price": "Starting price", "predicted_price": "Predicted price",
         "actual_price": "Actual price", "price_error_pct": "Price error (%)", "status": "Status",
     })
-    shown_cols = ["Issued (UTC)", "Asset", "Model", "Horizon", "Starting price", "Predicted price", "Target (UTC)", "Actual price", "Price error (%)", "Status", "Version"]
-    st.dataframe(
-        display[shown_cols], hide_index=True, use_container_width=True,
+    cols = ["Issued (UTC)", "Asset", "Horizon", "Model", "Starting price", "Predicted price", "Target (UTC)", "Actual price", "Price error (%)", "Status", "Version"]
+    st.dataframe(display[cols], hide_index=True, use_container_width=True,
         column_config={
             "Starting price": st.column_config.NumberColumn(format="$%.2f"),
             "Predicted price": st.column_config.NumberColumn(format="$%.2f"),
             "Actual price": st.column_config.NumberColumn(format="$%.2f"),
             "Price error (%)": st.column_config.NumberColumn(format="%.2f%%"),
-        },
-    )
-    st.download_button(
-        "Download filtered history (CSV)",
-        data=display[shown_cols].to_csv(index=False).encode("utf-8"),
+        })
+    st.download_button("Download filtered history (CSV)",
+        data=display[cols].to_csv(index=False).encode("utf-8"),
         file_name="forecast_history.csv", mime="text/csv",
-        help="Optional export; daily forecasting does not require manual downloads.",
-    )
+        help="Optional export; automated history does not need manual downloads.")
 
 st.subheader("Performance by model")
 if completed.empty:
-    st.info(
-        "No evaluated forecasts in this selection yet. Once a target candle has closed "
-        "and the evaluator runs successfully, accuracy will appear here."
-    )
+    st.info("No evaluated forecasts in this selection yet. Accuracy appears after the evaluator records actual prices.")
 else:
-    grouped = completed.groupby(["asset", "horizon_days", "model"], dropna=False)
-    stats = grouped.agg(tests=("id", "count"), mean_price_error=("price_error_pct", "mean")).reset_index()
-    direction = (
-        completed.loc[completed["direction_correct"].notna()]
+    keys = ["asset", "horizon_days", "model"]
+    stats = completed.groupby(keys).agg(
+        tests=("id", "count"), mean_price_error=("price_error_pct", "mean")
+    ).reset_index()
+    directions = (completed.loc[completed["direction_correct"].notna()]
         .assign(direction_value=lambda d: d["direction_correct"].astype(float))
-        .groupby(["asset", "horizon_days", "model"], dropna=False)["direction_value"]
-        .mean().mul(100).rename("direction_pct").reset_index()
-    )
-    stats = stats.merge(direction, how="left", on=["asset", "horizon_days", "model"])
-    stats = stats.rename(columns={
-        "asset": "Asset", "horizon_days": "Days", "model": "Model",
+        .groupby(keys)["direction_value"].mean().mul(100).rename("direction_pct").reset_index())
+    stats = stats.merge(directions, on=keys, how="left")
+    stats["model_rank"] = stats["model"].map(MODEL_ORDER).fillna(99)
+    stats = stats.sort_values(["asset", "horizon_days", "model_rank"])
+    stats = stats.rename(columns={"asset": "Asset", "horizon_days": "Days", "model": "Model",
         "tests": "Evaluated forecasts", "mean_price_error": "Mean price error (%)",
-        "direction_pct": "Direction correct (%)",
-    })
-    st.dataframe(
-        stats.sort_values(["Asset", "Days", "Model"]),
+        "direction_pct": "Direction correct (%)"})
+    st.dataframe(stats[["Asset", "Days", "Model", "Evaluated forecasts", "Mean price error (%)", "Direction correct (%)"]],
         hide_index=True, use_container_width=True,
         column_config={
             "Mean price error (%)": st.column_config.NumberColumn(format="%.2f%%"),
             "Direction correct (%)": st.column_config.NumberColumn(format="%.1f%%"),
-        },
-    )
-    st.caption(
-        "Lower mean price error is better. These are actual recorded forecasts, "
-        "not historical backtests. Compare models within the same asset and horizon."
-    )
-
+        })
+    st.caption("Lower mean price error is better. Compare models for the same asset and horizon. Very small samples are not reliable evidence of predictive skill.")
 st.divider()
-st.caption(
-    "Read-only page. Forecasts are saved and evaluated by GitHub Actions; "
-    "this page never inserts or edits database records. "
-    "Forecast accuracy is not a guarantee of future results."
-)
+st.caption("Read-only: GitHub Actions writes forecast outcomes; this page never modifies the database. Historical performance does not guarantee future accuracy.")
