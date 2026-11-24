@@ -21,7 +21,7 @@ MODEL_ORDER = {
     "7-day momentum benchmark": 2,
     "No-change baseline": 3,
 }
-MAX_ISSUE_DELAY_HOURS = 6.0  # Operational cutoff after origin UTC close
+PROMPT_HOURS = 6.0  # Operational prompt/delayed boundary after the origin UTC close
 SORT_OPTIONS = [
     "Newest issue date (BTC → ETH, 1d → 60d)",
     "Oldest issue date",
@@ -67,12 +67,18 @@ def to_dataframe(records: list[dict]) -> pd.DataFrame:
     origin_close = df["target_date"] - pd.to_timedelta(df["horizon_days"], unit="D")
     df["issue_delay_hours"] = (df["forecast_date"] - origin_close).dt.total_seconds() / 3600
     df["lead_hours"] = (df["target_date"] - df["forecast_date"]).dt.total_seconds() / 3600
+    # A forecast is valid only when issued after its origin candle closed and
+    # strictly before the target close. This is a timing check, not a guarantee
+    # the forecast used uncontaminated data or accurate market snapshots.
     coherent = (df["forecast_date"].notna() & df["target_date"].notna()
         & df["horizon_days"].isin([1, 7, 30, 60])
         & df["lead_hours"].gt(0) & df["issue_delay_hours"].ge(0))
-    df["timing_eligible"] = coherent & df["issue_delay_hours"].le(MAX_ISSUE_DELAY_HOURS)
-    df["timing"] = "Late / check"
-    df.loc[df["timing_eligible"], "timing"] = "On time"
+    df["timing_valid"] = coherent
+    df["timing_prompt"] = coherent & df["issue_delay_hours"].le(PROMPT_HOURS)
+    df["timing_delayed"] = coherent & df["issue_delay_hours"].gt(PROMPT_HOURS)
+    df["timing"] = "Invalid"
+    df.loc[df["timing_prompt"], "timing"] = "Valid-OnTime"
+    df.loc[df["timing_delayed"], "timing"] = "Valid — Delayed"
     return df
 
 
@@ -109,13 +115,15 @@ if capped:
     st.warning(f"Showing at most {MAX_ROWS:,} recent records; counts and performance may exclude older forecasts.")
 
 st.subheader("Choose what to inspect")
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     asset = st.selectbox("Asset", ["All", "BTC", "ETH"])
 with c2:
     horizon = st.selectbox("Forecast horizon (days)", ["All", "1", "7", "30", "60"])
 with c3:
     status = st.selectbox("Forecast status", ["All", "Pending", "Evaluated"])
+with c4:
+    timing_filter = st.selectbox("Timing classification", ["All", "Valid (all)", "Valid-OnTime", "Valid — Delayed", "Invalid"])
 filtered = frame.copy()
 if asset != "All":
     filtered = filtered.loc[filtered["asset"] == asset]
@@ -123,19 +131,28 @@ if horizon != "All":
     filtered = filtered.loc[filtered["horizon_days"] == int(horizon)]
 if status != "All":
     filtered = filtered.loc[filtered["status"] == status]
+if timing_filter == "Valid (all)":
+    filtered = filtered.loc[filtered["timing_valid"]]
+elif timing_filter != "All":
+    filtered = filtered.loc[filtered["timing"] == timing_filter]
 
 completed = filtered.loc[filtered["actual_price"].notna()].copy()
-comparable = completed.loc[completed["timing_eligible"]].copy()
-scored = comparable.loc[comparable["direction_correct"].notna()]
+valid_completed = completed.loc[completed["timing_valid"]].copy()
+prompt_completed = valid_completed.loc[valid_completed["timing_prompt"]].copy()
+delayed_completed = valid_completed.loc[valid_completed["timing_delayed"]].copy()
+scored_all = valid_completed.loc[valid_completed["direction_correct"].notna()]
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Stored forecasts", f"{len(filtered):,}")
 m2.metric("Awaiting outcomes", f"{int(filtered['actual_price'].isna().sum()):,}")
 m3.metric("Evaluated", f"{len(completed):,}")
-m4.metric("Correct direction (on-time)", "Not available" if scored.empty else f"{scored['direction_correct'].astype(float).mean()*100:.1f}%")
-late_count = int((~completed["timing_eligible"]).sum())
-if late_count:
-    st.warning(f"{late_count} evaluated forecast(s) were issued more than {MAX_ISSUE_DELAY_HOURS:g} hours after the origin UTC close, or have inconsistent timing. They remain visible but are excluded from the main accuracy statistics.")
-st.caption("Horizon refers to daily candles after the LAST completed UTC close, not hours since issuance. Lead-to-target shows actual time remaining. 'On time' means issued within six hours after the originating candle closed. Related model outcomes are not independent tests.")
+m4.metric("Correct direction (valid evaluated)", "Not available" if scored_all.empty else f"{scored_all['direction_correct'].astype(float).mean()*100:.1f}%")
+invalid_count = int((~completed["timing_valid"]).sum())
+delayed_count = len(delayed_completed)
+if invalid_count:
+    st.error(f"{invalid_count} evaluated forecast(s) have INVALID timing and are excluded from performance statistics. They remain in the history table for review.")
+if delayed_count:
+    st.info(f"{delayed_count} evaluated forecast(s) are Valid — Delayed. These count in the default performance statistics, but you can compare them separately from on-time forecasts.")
+st.caption("All times are UTC. A valid forecast is issued after its originating completed daily candle closes and before its target close. Valid-OnTime: issued within 6 hours of the origin close; Valid — Delayed: issued more than 6 hours after origin close but before target close. Invalid: issued before origin close, at/after target close, or with inconsistent/missing timing. The six-hour cutoff is an operational label, not a claim about forecast accuracy. Related model outcomes are not independent tests.")
 
 st.subheader("Recorded forecasts")
 sort_by = st.selectbox("Sort by", SORT_OPTIONS, index=0)
@@ -152,7 +169,8 @@ else:
         "starting_price": "Starting price", "predicted_price": "Predicted price",
         "actual_price": "Actual price", "price_error_pct": "Price error (%)", "status": "Status",
     })
-    cols = ["Issued (UTC)", "Asset", "Horizon", "Model", "Starting price", "Predicted price", "Target (UTC)", "Actual price", "Price error (%)", "Status", "Lead (hours)", "timing", "Version"]
+    display = display.rename(columns={"timing": "Timing"})
+    cols = ["Issued (UTC)", "Asset", "Horizon", "Model", "Starting price", "Predicted price", "Target (UTC)", "Actual price", "Price error (%)", "Status", "Lead (hours)", "Timing", "Version"]
     st.dataframe(display[cols], hide_index=True, use_container_width=True,
         column_config={
             "Starting price": st.column_config.NumberColumn(format="$%.2f"),
@@ -166,10 +184,26 @@ else:
         file_name="forecast_history.csv", mime="text/csv",
         help="Optional export; automated history does not need manual downloads.")
 
-st.subheader("Performance by model (on-time only)")
+st.subheader("Performance by model")
+performance_scope = st.radio(
+    "Include forecasts",
+    ["All valid (on-time + delayed)", "OnTime only", "Delayed only"],
+    horizontal=True,
+    help="All valid includes on-time and delayed forecasts issued before their target close. Invalid timing is always excluded from performance, but remains visible in Recorded forecasts.",
+)
+comparable = {
+    "All valid (on-time + delayed)": valid_completed,
+    "OnTime only": prompt_completed,
+    "Delayed only": delayed_completed,
+}[performance_scope]
 if comparable.empty:
-    st.info("No on-time evaluated forecasts yet. Late-issued records remain above but do not count toward comparable model accuracy. The first batches were issued well after the origin UTC close.")
+    if completed.empty:
+        st.info("No evaluated forecasts match the selected filters yet.")
+    else:
+        st.info("No evaluated forecasts match this timing category. Choose All valid to see both on-time and delayed results.")
 else:
+    if performance_scope == "All valid (on-time + delayed)" and delayed_count:
+        st.caption(f"Includes {delayed_count} valid delayed forecast(s). Delayed does not mean incorrect, but the lead time was shorter than an on-time forecast's.")
     keys = ["asset", "horizon_days", "model"]
     stats = comparable.groupby(keys).agg(
         tests=("id", "count"), mean_price_error=("price_error_pct", "mean")
@@ -189,6 +223,6 @@ else:
             "Mean price error (%)": st.column_config.NumberColumn(format="%.2f%%"),
             "Direction correct (%)": st.column_config.NumberColumn(format="%.1f%%"),
         })
-    st.caption("Only on-time records count. Lower mean price error is better. Compare models for the same asset and horizon; very small samples are unreliable.")
+    st.caption(f"Scope: {performance_scope}. Lower mean price error is better. Compare models for the same asset and horizon. With only a few evaluations, these figures are descriptive, not reliable evidence of model skill. Related model outcomes share market moves.")
 st.divider()
 st.caption("Read-only: GitHub Actions writes forecast outcomes; this page never modifies the database. Historical performance does not guarantee future accuracy.")
