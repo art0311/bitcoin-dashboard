@@ -44,7 +44,7 @@ jobs:
       - name: Check out tested development forecasting code
         uses: actions/checkout@v4
         with:
-          ref: feature/coinglass-api
+          ref: forecast-stable-v1
           persist-credentials: false
 
       - name: Set up Python
