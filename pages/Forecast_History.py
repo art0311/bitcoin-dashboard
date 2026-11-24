@@ -21,6 +21,7 @@ MODEL_ORDER = {
     "7-day momentum benchmark": 2,
     "No-change baseline": 3,
 }
+MAX_ISSUE_DELAY_HOURS = 6.0  # Operational cutoff after origin UTC close
 SORT_OPTIONS = [
     "Newest issue date (BTC → ETH, 1d → 60d)",
     "Oldest issue date",
@@ -62,6 +63,16 @@ def to_dataframe(records: list[dict]) -> pd.DataFrame:
     df["model_rank"] = df["model"].map(MODEL_ORDER).fillna(99).astype(int)
     df["asset_rank"] = df["asset"].map({"BTC": 0, "ETH": 1}).fillna(99).astype(int)
     df["issue_day"] = df["forecast_date"].dt.floor("D")
+    # Target is the UTC END of the h-th candle after the last completed close.
+    origin_close = df["target_date"] - pd.to_timedelta(df["horizon_days"], unit="D")
+    df["issue_delay_hours"] = (df["forecast_date"] - origin_close).dt.total_seconds() / 3600
+    df["lead_hours"] = (df["target_date"] - df["forecast_date"]).dt.total_seconds() / 3600
+    coherent = (df["forecast_date"].notna() & df["target_date"].notna()
+        & df["horizon_days"].isin([1, 7, 30, 60])
+        & df["lead_hours"].gt(0) & df["issue_delay_hours"].ge(0))
+    df["timing_eligible"] = coherent & df["issue_delay_hours"].le(MAX_ISSUE_DELAY_HOURS)
+    df["timing"] = "Late / check"
+    df.loc[df["timing_eligible"], "timing"] = "On time"
     return df
 
 
@@ -114,13 +125,17 @@ if status != "All":
     filtered = filtered.loc[filtered["status"] == status]
 
 completed = filtered.loc[filtered["actual_price"].notna()].copy()
-scored = completed.loc[completed["direction_correct"].notna()]
+comparable = completed.loc[completed["timing_eligible"]].copy()
+scored = comparable.loc[comparable["direction_correct"].notna()]
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Stored forecasts", f"{len(filtered):,}")
 m2.metric("Awaiting outcomes", f"{int(filtered['actual_price'].isna().sum()):,}")
 m3.metric("Evaluated", f"{len(completed):,}")
-m4.metric("Correct direction", "Not available" if scored.empty else f"{scored['direction_correct'].astype(float).mean()*100:.1f}%")
-st.caption("Each row is one model/asset/horizon prediction. Accuracy is based on evaluated records; multiple models and overlapping forecast targets are not independent tests.")
+m4.metric("Correct direction (on-time)", "Not available" if scored.empty else f"{scored['direction_correct'].astype(float).mean()*100:.1f}%")
+late_count = int((~completed["timing_eligible"]).sum())
+if late_count:
+    st.warning(f"{late_count} evaluated forecast(s) were issued more than {MAX_ISSUE_DELAY_HOURS:g} hours after the origin UTC close, or have inconsistent timing. They remain visible but are excluded from the main accuracy statistics.")
+st.caption("Horizon refers to daily candles after the LAST completed UTC close, not hours since issuance. Lead-to-target shows actual time remaining. 'On time' means issued within six hours after the originating candle closed. Related model outcomes are not independent tests.")
 
 st.subheader("Recorded forecasts")
 sort_by = st.selectbox("Sort by", SORT_OPTIONS, index=0)
@@ -131,33 +146,35 @@ else:
     display["Issued (UTC)"] = display["forecast_date"].dt.strftime("%Y-%m-%d %H:%M")
     display["Target (UTC)"] = display["target_date"].dt.strftime("%Y-%m-%d")
     display["Horizon"] = display["horizon_days"].map(lambda v: f"{int(v)}d" if pd.notna(v) else "—")
+    display["Lead (hours)"] = display["lead_hours"]
     display = display.rename(columns={
         "asset": "Asset", "model": "Model", "model_version": "Version",
         "starting_price": "Starting price", "predicted_price": "Predicted price",
         "actual_price": "Actual price", "price_error_pct": "Price error (%)", "status": "Status",
     })
-    cols = ["Issued (UTC)", "Asset", "Horizon", "Model", "Starting price", "Predicted price", "Target (UTC)", "Actual price", "Price error (%)", "Status", "Version"]
+    cols = ["Issued (UTC)", "Asset", "Horizon", "Model", "Starting price", "Predicted price", "Target (UTC)", "Actual price", "Price error (%)", "Status", "Lead (hours)", "timing", "Version"]
     st.dataframe(display[cols], hide_index=True, use_container_width=True,
         column_config={
             "Starting price": st.column_config.NumberColumn(format="$%.2f"),
             "Predicted price": st.column_config.NumberColumn(format="$%.2f"),
             "Actual price": st.column_config.NumberColumn(format="$%.2f"),
             "Price error (%)": st.column_config.NumberColumn(format="%.2f%%"),
+            "Lead (hours)": st.column_config.NumberColumn(format="%.1f"),
         })
     st.download_button("Download filtered history (CSV)",
         data=display[cols].to_csv(index=False).encode("utf-8"),
         file_name="forecast_history.csv", mime="text/csv",
         help="Optional export; automated history does not need manual downloads.")
 
-st.subheader("Performance by model")
-if completed.empty:
-    st.info("No evaluated forecasts in this selection yet. Accuracy appears after the evaluator records actual prices.")
+st.subheader("Performance by model (on-time only)")
+if comparable.empty:
+    st.info("No on-time evaluated forecasts yet. Late-issued records remain above but do not count toward comparable model accuracy. The first batches were issued well after the origin UTC close.")
 else:
     keys = ["asset", "horizon_days", "model"]
-    stats = completed.groupby(keys).agg(
+    stats = comparable.groupby(keys).agg(
         tests=("id", "count"), mean_price_error=("price_error_pct", "mean")
     ).reset_index()
-    directions = (completed.loc[completed["direction_correct"].notna()]
+    directions = (comparable.loc[comparable["direction_correct"].notna()]
         .assign(direction_value=lambda d: d["direction_correct"].astype(float))
         .groupby(keys)["direction_value"].mean().mul(100).rename("direction_pct").reset_index())
     stats = stats.merge(directions, on=keys, how="left")
@@ -172,6 +189,6 @@ else:
             "Mean price error (%)": st.column_config.NumberColumn(format="%.2f%%"),
             "Direction correct (%)": st.column_config.NumberColumn(format="%.1f%%"),
         })
-    st.caption("Lower mean price error is better. Compare models for the same asset and horizon. Very small samples are not reliable evidence of predictive skill.")
+    st.caption("Only on-time records count. Lower mean price error is better. Compare models for the same asset and horizon; very small samples are unreliable.")
 st.divider()
 st.caption("Read-only: GitHub Actions writes forecast outcomes; this page never modifies the database. Historical performance does not guarantee future accuracy.")
