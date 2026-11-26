@@ -290,49 +290,46 @@ else:
     st.sidebar.info("Could not fetch sentiment data.")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
+st.sidebar.subheader(f"🏦 {ASSET_TICKER} ETF Flows")
 
-# Read actual historical trading sessions, rather than recording app refreshes.
+# Free daily BTC ETF history, presented compactly in USD millions.
+# Keep `flow` for the existing AI Action Hint calculations.
 flow = None
 if ASSET_TICKER == "BTC":
     etf_rows = fetch_bitcoin_etf_history()
     if etf_rows:
         latest_date, flow = etf_rows[-1]
-        status = "🟢 Net Inflow" if flow > 0 else "🔴 Net Outflow" if flow < 0 else "🟡 Flat"
-        st.sidebar.metric("Latest Daily ETF Flow", f"{flow:+,.1f} US$mm", status)
-        st.sidebar.caption(f"Reported trading session: {latest_date} (US market)")
-        st.sidebar.caption("Source: [The Commoner Bitcoin ETF Tracker by TFTC](https://www.tftc.io/bitcoin-etf-flows) · US spot BTC ETFs · daily, not real-time")
+        direction = "🔴 Outflow" if flow < 0 else ("🟢 Inflow" if flow > 0 else "🟡 Flat")
+        st.sidebar.markdown(f"**Latest:** {flow:+,.1f}M · {direction}")
+        st.sidebar.caption(f"As of {latest_date} · USD millions")
 
-        last7 = [value for _, value in etf_rows[-7:]]
-        if len(last7) == 7:
-            current_sum = float(sum(last7))
-            st.sidebar.metric("Last 7 trading sessions — net flow", f"{current_sum:+,.1f} US$mm")
+        if len(etf_rows) >= 7:
+            current_sum = float(sum(value for _, value in etf_rows[-7:]))
+            st.sidebar.markdown(f"**Last 7 sessions:** {current_sum:+,.1f}M")
             if len(etf_rows) >= 14:
                 previous_sum = float(sum(value for _, value in etf_rows[-14:-7]))
                 change = current_sum - previous_sum
                 if abs(change) < 50:
-                    label = "🟡 Nearly unchanged"
+                    trend = "🟡 Flat"
                 elif change > 0:
-                    label = "🟢 Improving flows"
+                    trend = "🟢 Improving"
                 else:
-                    label = "🔴 Weakening flows"
-                st.sidebar.metric("7-session trend vs previous 7", label, f"{change:+,.1f} US$mm")
-            else:
-                st.sidebar.caption("Need 14 trading sessions for the trend comparison.")
-        else:
-            st.sidebar.caption("Not enough trading sessions for a 7-session total.")
+                    trend = "🔴 Weakening"
+                st.sidebar.markdown(f"**Trend:** {trend} ({change:+,.1f}M)")
+                st.sidebar.caption("Change vs previous 7 sessions")
+        st.sidebar.caption("[Source: TFTC](https://www.tftc.io/bitcoin-etf-flows) · Daily, not live")
     else:
-        st.sidebar.info("BTC ETF flow data temporarily unavailable. Check the source link or try again later.")
-        st.sidebar.caption("Source: [The Commoner Bitcoin ETF Tracker by TFTC](https://www.tftc.io/bitcoin-etf-flows)")
+        st.sidebar.info("BTC ETF flows temporarily unavailable.")
+        st.sidebar.caption("[Source: TFTC](https://www.tftc.io/bitcoin-etf-flows)")
 else:
-    # The new TFTC source is BTC-only. Do not silently substitute BTC flows for ETH.
+    # BTC feed is not an ETH feed; retain the previous ETH fallback unchanged.
     flow = fetch_ethereum_etf_flow_usdm()
     if flow is not None and np.isfinite(flow):
-        status = "🟢 Net Inflow" if flow > 0 else "🔴 Net Outflow" if flow < 0 else "🟡 Flat"
-        st.sidebar.metric("ETH ETF flow (legacy source)", f"{flow:+,.1f} US$mm", status)
-        st.sidebar.caption("Legacy DefiLlama HTML estimate · reporting date unverified; use cautiously")
+        direction = "🔴 Outflow" if flow < 0 else ("🟢 Inflow" if flow > 0 else "🟡 Flat")
+        st.sidebar.markdown(f"**Latest:** {flow:+,.1f}M · {direction}")
+        st.sidebar.caption("DefiLlama legacy estimate · Date unverified")
     else:
-        st.sidebar.info("ETH ETF flow feed unavailable; the BTC feed does not cover ETH.")
+        st.sidebar.info("ETH ETF flows unavailable.")
 
 
 # -----------------------------
