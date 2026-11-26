@@ -178,22 +178,41 @@ def fetch_bitcoin_etf_history():
         return []
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_ethereum_etf_flow_usdm():
-    """Legacy fallback (not validated): existing HTML-based ETH source."""
-    urls = ["https://defillama2.llamao.fi/etfs", "https://defillama.com/etfs"]
-    pattern = r"Ethereum[\s\S]{0,2500}?Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])"
-    for url in urls:
-        try:
-            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-            response.raise_for_status()
-            match = re.search(pattern, response.text, flags=re.IGNORECASE)
-            if match:
-                sign = -1 if match.group(1) == "-" else 1
-                return sign * float(match.group(2).replace(",", "")) * (1000 if match.group(3).lower() == "b" else 1)
-        except (requests.RequestException, ValueError):
-            continue
-    return None
+ETF_ETH_FEED = "https://growyourethereum.com/datasets/eth-etf-flows.json"
+ETF_ETH_SOURCE = "https://growyourethereum.com/data/ethereum-etf-flows"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_ethereum_etf_history():
+    """Return dated US spot ETH ETF daily flow totals in USD millions, oldest first."""
+    try:
+        response = requests.get(
+            ETF_ETH_FEED,
+            headers={"User-Agent": "CryptoDashboard/1.0", "Accept": "application/json"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("daily"), list):
+            return []
+
+        records = {}
+        for row in payload["daily"]:
+            if not isinstance(row, dict):
+                continue
+            date = str(row.get("date", ""))[:10]
+            value = row.get("total")  # Feed already uses USD millions.
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or value is None:
+                continue
+            try:
+                flow_usdm = float(value)
+            except (ValueError, TypeError):
+                continue
+            if np.isfinite(flow_usdm):
+                records[date] = flow_usdm
+        return sorted(records.items())
+    except (requests.RequestException, ValueError, TypeError):
+        return []
 
 
 # -----------------------------
@@ -322,14 +341,40 @@ if ASSET_TICKER == "BTC":
         st.sidebar.info("BTC ETF flows temporarily unavailable.")
         st.sidebar.caption("[Source: TFTC](https://www.tftc.io/bitcoin-etf-flows)")
 else:
-    # BTC feed is not an ETH feed; retain the previous ETH fallback unchanged.
-    flow = fetch_ethereum_etf_flow_usdm()
-    if flow is not None and np.isfinite(flow):
-        direction = "🔴 Outflow" if flow < 0 else ("🟢 Inflow" if flow > 0 else "🟡 Flat")
-        st.sidebar.markdown(f"**Latest:** {flow:+,.1f}M · {direction}")
-        st.sidebar.caption("DefiLlama legacy estimate · Date unverified")
+    # Same compact presentation as BTC, using ETH-specific dated daily flows.
+    etf_rows = fetch_ethereum_etf_history()
+    if etf_rows:
+        latest_date, latest_flow = etf_rows[-1]
+        direction = "🔴 Outflow" if latest_flow < 0 else ("🟢 Inflow" if latest_flow > 0 else "🟡 Flat")
+        st.sidebar.markdown(f"**Latest:** {latest_flow:+,.1f}M · {direction}")
+        st.sidebar.caption(f"As of {latest_date} · USD millions")
+
+        if len(etf_rows) >= 7:
+            current_sum = float(sum(value for _, value in etf_rows[-7:]))
+            st.sidebar.markdown(f"**Last 7 sessions:** {current_sum:+,.1f}M")
+            if len(etf_rows) >= 14:
+                previous_sum = float(sum(value for _, value in etf_rows[-14:-7]))
+                change = current_sum - previous_sum
+                if abs(change) < 50:
+                    trend = "🟡 Flat"
+                elif change > 0:
+                    trend = "🟢 Improving"
+                else:
+                    trend = "🔴 Weakening"
+                st.sidebar.markdown(f"**Trend:** {trend} ({change:+,.1f}M)")
+                st.sidebar.caption("Change vs previous 7 sessions")
+
+        # ETH ETF information is secondary; only recent data should affect action hints.
+        age_days = (pd.Timestamp.now(tz="UTC").date() - pd.Timestamp(latest_date).date()).days
+        if age_days < 0 or age_days > 4:
+            flow = None  # Display historical reading, but do not use a stale reading in action hints.
+            st.sidebar.caption("⚠️ Older report · excluded from action hint")
+        else:
+            flow = latest_flow
+        st.sidebar.caption("[Source: GrowYourEthereum](https://growyourethereum.com/data/ethereum-etf-flows) · Farside · Daily, not live")
     else:
-        st.sidebar.info("ETH ETF flows unavailable.")
+        st.sidebar.info("ETH ETF flows temporarily unavailable.")
+        st.sidebar.caption("[Source: GrowYourEthereum](https://growyourethereum.com/data/ethereum-etf-flows)")
 
 
 # -----------------------------
