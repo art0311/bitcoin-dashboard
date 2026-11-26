@@ -133,63 +133,67 @@ def market_strength_score(btc: pd.DataFrame):
     return score, label
 
 # -----------------------------
-# Spot BTC ETF Daily Net Flow (US$mm) - robust (no read_html)
+# US spot Bitcoin ETF daily flows (USD millions).
+# Free JSON from The Commoner Bitcoin ETF Tracker by TFTC (CC BY 4.0).
+# For ETH, retain the legacy DefiLlama lookup for now rather than display BTC data as ETH.
 # -----------------------------
-@st.cache_data(ttl=900)
-def fetch_spot_etf_flow_usdm(asset_label: str):
-    """
-    Returns latest daily net flow for US spot crypto ETFs in USD millions (float).
-    Supports: "Bitcoin", "Ethereum"
-    Source: DefiLlama (flows attributed to Farside on the page).
-    """
-    if asset_label not in ("Bitcoin", "Ethereum"):
-        return None
+ETF_BTC_FEED = "https://www.tftc.io/bitcoin-etf-flows/data.json"
+ETF_BTC_SOURCE = "https://www.tftc.io/bitcoin-etf-flows"
 
-    urls = [
-        "https://defillama2.llamao.fi/etfs",  # mirror works on Streamlit Cloud
-        "https://defillama.com/etfs",
-    ]
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/html",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_bitcoin_etf_history():
+    """Return [(trading_date, net_flow_USD_millions), ...] oldest first."""
+    try:
+        response = requests.get(
+            ETF_BTC_FEED,
+            headers={"User-Agent": "CryptoDashboard/1.0", "Accept": "application/json"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("days"), list):
+            return []
 
-    # Example snippets:
-    # Bitcoin ... Flows -$394.7m
-    # Ethereum ... Flows $2.91b
-    pattern = (
-        rf"{asset_label}[\s\S]{{0,2500}}?"
-        r"Flows[^0-9\-+]*"
-        r"([+-])?\$?\s*"
-        r"([0-9][0-9,\.]*)\s*"
-        r"([mMbB])"
-    )
+        records = {}
+        for row in payload["days"]:
+            if not isinstance(row, dict):
+                continue
+            date = str(row.get("date", ""))[:10]
+            value = row.get("netFlowUsd")
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or value is None:
+                continue
+            try:
+                flow_usd = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(flow_usd):
+                continue
+            # The provider marks a zero row without a fund breakdown as a holiday.
+            if flow_usd == 0 and not row.get("perEtfUsd"):
+                continue
+            records[date] = flow_usd / 1_000_000.0
+        return sorted(records.items())
+    except (requests.RequestException, ValueError, TypeError):
+        return []
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ethereum_etf_flow_usdm():
+    """Legacy fallback (not validated): existing HTML-based ETH source."""
+    urls = ["https://defillama2.llamao.fi/etfs", "https://defillama.com/etfs"]
+    pattern = r"Ethereum[\s\S]{0,2500}?Flows[^0-9\-+]*([+-])?\$?\s*([0-9][0-9,\.]*)\s*([mMbB])"
     for url in urls:
         try:
-            r = requests.get(url, headers=headers, timeout=15)
-            if r.status_code != 200:
-                continue
-
-            html = r.text
-            m = re.search(pattern, html, flags=re.IGNORECASE)
-            if not m:
-                continue
-
-            sign = -1.0 if (m.group(1) == "-") else 1.0
-            num = float(m.group(2).replace(",", ""))
-            unit = m.group(3).lower()
-
-            # normalize to USD millions
-            return sign * num * (1000.0 if unit == "b" else 1.0)
-
-        except Exception:
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            response.raise_for_status()
+            match = re.search(pattern, response.text, flags=re.IGNORECASE)
+            if match:
+                sign = -1 if match.group(1) == "-" else 1
+                return sign * float(match.group(2).replace(",", "")) * (1000 if match.group(3).lower() == "b" else 1)
+        except (requests.RequestException, ValueError):
             continue
-
     return None
-
 
 
 # -----------------------------
@@ -288,54 +292,47 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"🏦 Spot {ASSET_TICKER} ETF Flows (US$mm)")
 
-flow = fetch_spot_etf_flow_usdm(ETF_ASSET_LABEL) if ETF_ASSET_LABEL else None
+# Read actual historical trading sessions, rather than recording app refreshes.
+flow = None
+if ASSET_TICKER == "BTC":
+    etf_rows = fetch_bitcoin_etf_history()
+    if etf_rows:
+        latest_date, flow = etf_rows[-1]
+        status = "🟢 Net Inflow" if flow > 0 else "🔴 Net Outflow" if flow < 0 else "🟡 Flat"
+        st.sidebar.metric("Latest Daily ETF Flow", f"{flow:+,.1f} US$mm", status)
+        st.sidebar.caption(f"Reported trading session: {latest_date} (US market)")
+        st.sidebar.caption("Source: [The Commoner Bitcoin ETF Tracker by TFTC](https://www.tftc.io/bitcoin-etf-flows) · US spot BTC ETFs · daily, not real-time")
 
-# Store a small history in session_state so we can do 7-entry rolling trend
-# (persists while the app stays running)
-hist_key = f"etf_flow_hist_{ASSET_TICKER}"
-if hist_key not in st.session_state:
-    st.session_state[hist_key] = []
-
-# Update history if we got a valid number
-if flow is not None and np.isfinite(flow):
-    hist = st.session_state[hist_key]
-    # prevent duplicate repeats on reruns if the value hasn't changed
-    if not hist or hist[-1] != float(flow):
-        hist.append(float(flow))
-    # keep last 30 values
-    st.session_state[hist_key] = hist[-30:]
-
-if flow is None or (isinstance(flow, (int, float)) and not np.isfinite(flow)):
-    st.sidebar.info("ETF flow data unavailable.")
-else:
-    label = "🟢 Net Inflow" if flow > 0 else ("🔴 Net Outflow" if flow < 0 else "🟡 Flat")
-    st.sidebar.metric("Latest Daily ETF Flow", f"{flow:,.1f} US$mm", label)
-    st.sidebar.caption("Source: DefiLlama (flows attributed to Farside on page)")
-
-# --- 7-entry rolling trend label (based on stored history) ---
-hist = st.session_state.get(hist_key, [])
-if len(hist) >= 7:
-    last7_sum = float(np.sum(hist[-7:]))
-    st.sidebar.metric("7-entry rolling net flow", f"{last7_sum:,.1f} US$mm")
-
-    if len(hist) >= 14:
-        prev7_sum = float(np.sum(hist[-14:-7]))
-        delta = last7_sum - prev7_sum
-
-        rel = abs(delta) / max(abs(prev7_sum), 1e-9)
-        if abs(delta) < 50 and rel < 0.25:
-            trend = "🟡 Flat / Mixed"
-        elif delta > 0:
-            trend = "🟢 Rising (more inflow)"
+        last7 = [value for _, value in etf_rows[-7:]]
+        if len(last7) == 7:
+            current_sum = float(sum(last7))
+            st.sidebar.metric("Last 7 trading sessions — net flow", f"{current_sum:+,.1f} US$mm")
+            if len(etf_rows) >= 14:
+                previous_sum = float(sum(value for _, value in etf_rows[-14:-7]))
+                change = current_sum - previous_sum
+                if abs(change) < 50:
+                    label = "🟡 Nearly unchanged"
+                elif change > 0:
+                    label = "🟢 Improving flows"
+                else:
+                    label = "🔴 Weakening flows"
+                st.sidebar.metric("7-session trend vs previous 7", label, f"{change:+,.1f} US$mm")
+            else:
+                st.sidebar.caption("Need 14 trading sessions for the trend comparison.")
         else:
-            trend = "🔴 Falling (more outflow)"
-
-        st.sidebar.metric("7-entry trend", trend, f"Δ vs prior 7: {delta:+,.1f} US$mm")
+            st.sidebar.caption("Not enough trading sessions for a 7-session total.")
     else:
-        st.sidebar.caption("7-entry trend: Need 14 values for comparison.")
+        st.sidebar.info("BTC ETF flow data temporarily unavailable. Check the source link or try again later.")
+        st.sidebar.caption("Source: [The Commoner Bitcoin ETF Tracker by TFTC](https://www.tftc.io/bitcoin-etf-flows)")
 else:
-    st.sidebar.caption("7-entry trend: collecting data (need 7 refreshes).")
-
+    # The new TFTC source is BTC-only. Do not silently substitute BTC flows for ETH.
+    flow = fetch_ethereum_etf_flow_usdm()
+    if flow is not None and np.isfinite(flow):
+        status = "🟢 Net Inflow" if flow > 0 else "🔴 Net Outflow" if flow < 0 else "🟡 Flat"
+        st.sidebar.metric("ETH ETF flow (legacy source)", f"{flow:+,.1f} US$mm", status)
+        st.sidebar.caption("Legacy DefiLlama HTML estimate · reporting date unverified; use cautiously")
+    else:
+        st.sidebar.info("ETH ETF flow feed unavailable; the BTC feed does not cover ETH.")
 
 
 # -----------------------------
@@ -1100,6 +1097,5 @@ if "AI Forecast" in show_panels:
 
     else:
         st.info("Not enough data for AI predictions yet (need ~25+ data points).")
-
 
 
