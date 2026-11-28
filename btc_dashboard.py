@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import plotly.graph_objects as go
 import re
@@ -230,9 +230,27 @@ def _market_float(value):
 
 
 def _coinalyze_time(seconds):
+    """Format provider timestamps safely; absent/invalid values must never crash the app.
+
+    Coinalyze may return no `update` field on some current-data endpoints.
+    Date-only strings and Unix seconds/milliseconds are accepted, but anything
+    implausible is treated as an unknown reporting timestamp.
+    """
+    if seconds is None or isinstance(seconds, bool):
+        return None
     try:
-        return pd.to_datetime(int(seconds), unit="s", utc=True).strftime("%Y-%m-%d %H:%M UTC")
-    except (TypeError, ValueError, OverflowError):
+        if isinstance(seconds, str) and not seconds.strip():
+            return None
+        timestamp = float(seconds)
+        if not np.isfinite(timestamp):
+            return None
+        if timestamp > 1e11:  # Unix milliseconds, if a provider uses them
+            timestamp /= 1000.0
+        parsed = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        if not (2000 <= parsed.year <= 2100):
+            return None
+        return parsed.strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError, OverflowError, OSError, NotImplementedError):
         return None
 
 
