@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import plotly.graph_objects as go
 import re
@@ -216,6 +216,360 @@ def fetch_ethereum_etf_history():
 
 
 # -----------------------------
+# Derivatives-market context — Coinalyze authenticated read-only data.
+# The API key is read ONLY from Streamlit Secrets, never placed in the repo.
+# One supported perpetual contract is selected using provider metadata.
+# No guessed liquidation heatmap values and no trading activity.
+# -----------------------------
+def _market_float(value):
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _coinalyze_time(seconds):
+    """Format provider timestamps safely; absent/invalid values must never crash the app.
+
+    Coinalyze may return no `update` field on some current-data endpoints.
+    Date-only strings and Unix seconds/milliseconds are accepted, but anything
+    implausible is treated as an unknown reporting timestamp.
+    """
+    if seconds is None or isinstance(seconds, bool):
+        return None
+    try:
+        if isinstance(seconds, str) and not seconds.strip():
+            return None
+        timestamp = float(seconds)
+        if not np.isfinite(timestamp):
+            return None
+        if timestamp > 1e11:  # Unix milliseconds, if a provider uses them
+            timestamp /= 1000.0
+        parsed = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        if not (2000 <= parsed.year <= 2100):
+            return None
+        return parsed.strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError, OverflowError, OSError, NotImplementedError):
+        return None
+
+
+def _coinalyze_key():
+    try:
+        return str(st.secrets.get("COINALYZE_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+class CoinalyzeDataError(Exception):
+    pass
+
+
+def _coinalyze_get(endpoint, key, params=None):
+    try:
+        response = requests.get(
+            "https://api.coinalyze.net/v1/" + endpoint,
+            params=params or {},
+            headers={"api_key": key, "Accept": "application/json"},
+            timeout=12,
+        )
+        if response.status_code == 401:
+            raise CoinalyzeDataError("API key missing or rejected (HTTP 401)")
+        if response.status_code == 429:
+            raise CoinalyzeDataError("API rate limit reached (HTTP 429)")
+        if response.status_code != 200:
+            raise CoinalyzeDataError(f"{endpoint}: HTTP {response.status_code}")
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise CoinalyzeDataError(f"{endpoint}: unexpected response format")
+        return payload
+    except requests.RequestException as exc:
+        raise CoinalyzeDataError(f"{endpoint}: network unavailable ({type(exc).__name__})") from exc
+    except (ValueError, TypeError) as exc:
+        raise CoinalyzeDataError(f"{endpoint}: invalid JSON response") from exc
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _coinalyze_market(ticker, key):
+    markets = _coinalyze_get("future-markets", key)
+    options = [m for m in markets if isinstance(m, dict)
+               and m.get("base_asset", "").upper() == ticker
+               and m.get("quote_asset", "").upper() == "USDT"
+               and m.get("is_perpetual") is True
+               and m.get("has_long_short_ratio_data") is True
+               and m.get("symbol")]
+    if not options:
+        raise CoinalyzeDataError(f"No {ticker}/USDT perpetual with long/short data listed")
+    # Prefer a known large exchange; never assume suffix letters identify venues.
+    def sort_key(m):
+        ex = str(m.get("exchange", "")).lower()
+        priority = 0 if "binance" in ex else 1 if "bybit" in ex else 2
+        return (priority, str(m.get("symbol")))
+    return sorted(options, key=sort_key)[0]
+
+
+def _coinalyze_latest_history(entries):
+    if not isinstance(entries, list) or not entries:
+        return []
+    first = entries[0]
+    if not isinstance(first, dict) or not isinstance(first.get("history"), list):
+        return []
+    return sorted((row for row in first["history"] if isinstance(row, dict)),
+                  key=lambda row: row.get("t", 0))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_coinalyze_context(ticker, key):
+    result = {"exchange": "Coinalyze", "contract": None, "funding_pct": None,
+              "long_pct": None, "short_pct": None, "oi_usd": None,
+              "oi_change_pct": None, "oi_period": "1h", "asof": None,
+              "ratio_asof": None, "oi_asof": None, "available": 0,
+              "notes": [], "fatal": None}
+    try:
+        market = _coinalyze_market(ticker, key)
+    except CoinalyzeDataError as exc:
+        result["fatal"] = str(exc)
+        return result
+    symbol = str(market["symbol"])
+    result["contract"] = symbol
+    result["exchange"] = str(market.get("exchange") or "Exchange")
+    result["oi_basis"] = str(market.get("oi_lq_vol_denominated_in") or "UNKNOWN")
+    now = int(pd.Timestamp.now(tz="UTC").timestamp())
+    common = {"symbols": symbol}
+
+    try:
+        rows = _coinalyze_get("funding-rate", key, common)
+        if rows:
+            value = _market_float(rows[0].get("value"))
+            if value is not None:
+                # Coinalyze presents funding rates as percentages, not fractions.
+                result["funding_pct"] = value
+                result["available"] += 1
+            result["asof"] = _coinalyze_time(rows[0].get("update"))
+    except CoinalyzeDataError as exc:
+        result["notes"].append("Funding: " + str(exc))
+
+    try:
+        rows = _coinalyze_get("open-interest", key,
+                              {**common, "convert_to_usd": "true"})
+        if rows:
+            value = _market_float(rows[0].get("value"))
+            if value is not None:
+                result["oi_usd"] = value
+                result["available"] += 1
+            result["oi_asof"] = _coinalyze_time(rows[0].get("update"))
+    except CoinalyzeDataError as exc:
+        result["notes"].append("Open interest: " + str(exc))
+
+    history_params = {**common, "interval": "1hour", "from": now - 6 * 3600, "to": now}
+    try:
+        entries = _coinalyze_get("open-interest-history", key,
+                                 {**history_params, "convert_to_usd": "true"})
+        history = _coinalyze_latest_history(entries)
+        if len(history) >= 2:
+            current = _market_float(history[-1].get("c"))
+            previous = _market_float(history[-2].get("c"))
+            if current is not None and previous is not None and previous > 0:
+                result["oi_change_pct"] = (current / previous - 1) * 100.0
+    except CoinalyzeDataError as exc:
+        result["notes"].append("OI change: " + str(exc))
+
+    try:
+        rows = _coinalyze_get("long-short-ratio-history", key, history_params)
+        history = _coinalyze_latest_history(rows)
+        if history:
+            row = history[-1]
+            longs, shorts = _market_float(row.get("l")), _market_float(row.get("s"))
+            if longs is not None and shorts is not None and longs >= 0 and shorts >= 0 and (longs+shorts)>0:
+                result["long_pct"] = 100 * longs / (longs+shorts)
+                result["short_pct"] = 100 * shorts / (longs+shorts)
+            else:
+                ratio = _market_float(row.get("r"))
+                if ratio is not None and ratio >= 0:
+                    result["long_pct"] = 100 * ratio / (1+ratio)
+                    result["short_pct"] = 100 / (1+ratio)
+            if result["long_pct"] is not None:
+                result["available"] += 1
+                result["ratio_asof"] = _coinalyze_time(row.get("t"))
+    except CoinalyzeDataError as exc:
+        result["notes"].append("Long/short ratio: " + str(exc))
+
+    return result
+
+
+
+# -----------------------------
+# Independent, public model-estimated liquidation clusters.
+# No exchange publishes centralized users' true liquidation levels.
+# Do not mix these estimates with Coinalyze contract-specific OI.
+# -----------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_modeled_liquidation_zones(ticker):
+    result = {"valid": False, "reason": "Unavailable", "price": None,
+              "long": None, "short": None, "asof": None, "version": None}
+    if ticker not in ("BTC", "ETH"):
+        return result
+    try:
+        response = requests.get(
+            f"https://swolecharts.com/api/liquidation-levels/{ticker}",
+            params={"range": "24h"},
+            headers={"Accept": "application/json", "User-Agent": "CryptoDashboard/1.0"},
+            timeout=12,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or data.get("estimated") is not True or data.get("has_data") is not True:
+            result["reason"] = "Provider has no usable model snapshot."
+            return result
+        if str(data.get("coin", "")).upper() != ticker:
+            result["reason"] = "Provider coin mismatch."
+            return result
+        reference = _market_float(data.get("price"))
+        stamp = _market_float(data.get("as_of"))
+        if reference is None or reference <= 0 or stamp is None:
+            result["reason"] = "Missing price or timestamp."
+            return result
+        asof = datetime.fromtimestamp(stamp / 1000 if stamp > 1e11 else stamp, tz=timezone.utc)
+        age = (datetime.now(timezone.utc) - asof).total_seconds()
+        if age < -300 or age > 2 * 3600:
+            result["reason"] = "Snapshot is older than 2 hours or its timestamp is invalid."
+            return result
+        levels = data.get("levels", {})
+        if not isinstance(levels, dict):
+            result["reason"] = "No levels in provider response."
+            return result
+        for side in ("long", "short"):
+            candidates = []
+            for item in levels.get(side, []):
+                if not isinstance(item, dict):
+                    continue
+                mid = _market_float(item.get("mid"))
+                usd = _market_float(item.get("usd"))
+                if mid is None or usd is None or usd <= 0:
+                    continue
+                if (side == "long" and mid >= reference) or (side == "short" and mid <= reference):
+                    continue
+                # Select the most intense reported zone, not the nearest by price.
+                candidates.append({"price": mid, "usd": usd,
+                                   "distance_pct": 100 * (mid / reference - 1)})
+            if candidates:
+                result[side] = max(candidates, key=lambda x: x["usd"])
+        result.update({"valid": bool(result["long"] or result["short"]),
+                       "price": reference, "asof": asof.strftime("%Y-%m-%d %H:%M UTC"),
+                       "version": str(data.get("model_version") or "unknown")[:70],
+                       "reason": "No qualifying zones in the current estimate."})
+        return result
+    except (requests.RequestException, ValueError, TypeError, OverflowError, OSError) as exc:
+        result["reason"] = f"Liquidation data request unavailable ({type(exc).__name__})."
+        return result
+
+
+def _compact_usd(value):
+    if value is None:
+        return "N/A"
+    if abs(value) >= 1e9:
+        return f"${value / 1e9:,.2f}B"
+    if abs(value) >= 1e6:
+        return f"${value / 1e6:,.1f}M"
+    return f"${value:,.0f}"
+
+# -----------------------------
+# One-glance MARKET BIAS (24h heuristic, NOT a calibrated probability).
+# Price momentum, modeled liquidation concentrations, account ratios,
+# funding, and recent ETF flows are heterogeneous signals. A score measures
+# their weighted directional lean; it does not forecast a success rate.
+# -----------------------------
+def compute_directional_outlook(ctx, zones, daily_closes, etf_history, oi_scale=True):
+    # Signed signal values are constrained to [-1, +1]. Zero is NOT used
+    # for missing data. That distinction keeps coverage honest.
+    components = []
+
+    def add(name, weight, signal, detail):
+        if signal is not None and np.isfinite(signal):
+            components.append({"name": name, "weight": weight,
+                               "signal": float(np.clip(signal, -1, 1)),
+                               "detail": detail})
+
+    # Latest daily data from Yahoo (including its potentially forming candle).
+    series = pd.Series(daily_closes).dropna().astype(float)
+    if len(series) >= 8 and series.iloc[-8] > 0 and series.iloc[-2] > 0:
+        p = float(series.iloc[-1])
+        d1 = p / float(series.iloc[-2]) - 1
+        d7 = p / float(series.iloc[-8]) - 1
+        # Scale: a 2% 1-day or 7% 7-day move saturates each subscore.
+        momentum = .6 * np.clip(d1 / .02, -1, 1) + .4 * np.clip(d7 / .07, -1, 1)
+        add("Price momentum", .35, momentum, f"1-day {d1:+.2%} · 7-day {d7:+.2%}")
+
+    if zones.get("valid") and zones.get("long") and zones.get("short"):
+        below, above = zones["long"], zones["short"]
+        db, da = abs(below["distance_pct"]), abs(above["distance_pct"])
+        if 0.15 <= db <= 25 and 0.15 <= da <= 25:
+            # Proximity-weighted *estimated* cluster pressure, capped so one
+            # far-away band cannot dominate the direction score.
+            up = max(0, above["usd"]) / max(da, 1)
+            down = max(0, below["usd"]) / max(db, 1)
+            if up+down > 0:
+                imbalance = (up-down)/(up+down)
+                add("Liquidation zones", .30, imbalance,
+                    f"Upper ${above['price']:,.0f} · lower ${below['price']:,.0f} (estimated)")
+
+    if ctx and ctx.get("funding_pct") is not None:
+        # Negative funding can signal shorts paying longs, but its
+        # relationship with next-day price is uncertain and often contrarian.
+        rate = float(ctx["funding_pct"])
+        add("Funding", .10, -np.clip(rate/.03, -1, 1), f"{rate:+.4f}% · contrarian heuristic")
+
+    if ctx and ctx.get("long_pct") is not None:
+        long_pct = float(ctx["long_pct"])
+        # Only strong account crowding contributes; the account count is not
+        # the same as total leveraged exposure in dollars.
+        bias = -np.clip((long_pct - 50)/35, -1, 1)
+        add("Long/short accounts", .10, bias,
+            f"{long_pct:.1f}% measured accounts long · contrarian heuristic")
+
+    if etf_history and len(etf_history) >= 7:
+        try:
+            latest_date = pd.Timestamp(etf_history[-1][0]).date()
+            age = (pd.Timestamp.now(tz='UTC').date() - latest_date).days
+            if 0 <= age <= 4:
+                seven = sum(float(v) for _, v in etf_history[-7:])
+                # BTC/ETH ETFs use different USD flow magnitudes. Normalize
+                # by each series' recent typical absolute daily flow instead
+                # of assuming BTC-scale dollars apply to ETH.
+                recent = [abs(float(v)) for _, v in etf_history[-30:]]
+                typical = max(float(np.median(recent)), 10)
+                raw = np.clip(seven / (7*typical), -1, 1)
+                add("ETF flows", .15, raw,
+                    f"7 sessions {seven:+,.1f}M · as of {latest_date}")
+        except (ValueError, TypeError, OverflowError):
+            pass
+
+    coverage = sum(c["weight"] for c in components)
+    if coverage < .65 or len(components) < 3:
+        return {"ready": False, "coverage": coverage, "components": components,
+                "reason": "Not enough current independent signals for a directional reading."}
+
+    signed = sum(c["weight"] * c["signal"] for c in components) / coverage
+    oi_delta = ctx.get("oi_change_pct") if ctx else None
+    if oi_scale and oi_delta is not None and np.isfinite(oi_delta):
+        # Higher OI can amplify existing pressure, but has NO direction itself.
+        amp = 1 + .10 * float(np.clip(oi_delta / 2.0, -1, 1))
+        signed *= amp
+    signed = float(np.clip(signed, -1, 1))
+    up_score = int(round(50 + 50*signed))
+    if up_score >= 57:
+        direction, icon = "Bullish lean", "↗"
+    elif up_score <= 43:
+        direction, icon = "Bearish lean", "↘"
+    else:
+        direction, icon = "Mixed / neutral", "↔"
+    return {"ready": True, "coverage": coverage, "components": components,
+            "up_score": up_score, "down_score": 100-up_score,
+            "direction": direction, "icon": icon, "signed": signed,
+            "oi_delta": oi_delta}
+
+
+# -----------------------------
 # Sidebar
 # -----------------------------
 st.sidebar.title("⚙️ Settings")
@@ -261,7 +615,7 @@ show_indicators = st.sidebar.multiselect(
     default=indicator_options,
 )
 
-panel_options = ["Volume", "RSI", "OBV", "MACD", "AI Forecast"]
+panel_options = ["Leverage & Liquidations", "Volume", "RSI", "OBV", "MACD", "AI Forecast"]
 show_panels = st.sidebar.multiselect(
     "Panels to show",
     panel_options,
@@ -642,6 +996,155 @@ if has_data(btc, ["Close"]):
     plt.close(fig)
 else:
     st.info("Not enough data to plot price.")
+
+# -----------------------------
+# Leverage & Liquidation Analysis — compact, read-only, no trading.
+# Coinalyze metrics refer to ONE exchange perpetual; liquidation zones
+# are independent modeled estimates of positions from multiple venues.
+# -----------------------------
+if "Leverage & Liquidations" in show_panels:
+    st.subheader(f"⚖️ {ASSET_TICKER} Leverage & Liquidation Analysis")
+    with st.expander("📊 Market pressure · Liquidation zones", expanded=True):
+        api_key = _coinalyze_key()
+        if not api_key:
+            st.info("Add COINALYZE_API_KEY to your development Streamlit Secrets to show live futures metrics.")
+            st.markdown("[Get your free Coinalyze key](https://coinalyze.net/account/api-key/)")
+        else:
+            ctx = fetch_coinalyze_context(ASSET_TICKER, api_key)
+            if not ctx["available"]:
+                st.warning("Futures metrics are currently unavailable.")
+                if ctx.get("fatal"):
+                    with st.expander("Connection diagnostics"):
+                        st.caption(ctx["fatal"])
+            else:
+                funding = ctx["funding_pct"]
+                change = ctx["oi_change_pct"]
+                longs = ctx["long_pct"]
+                shorts = ctx["short_pct"]
+                a, b, c = st.columns(3)
+                with a:
+                    st.metric("Funding", f"{funding:+.4f}%" if funding is not None else "N/A")
+                    if funding is not None:
+                        st.caption("Longs pay shorts" if funding > 0 else
+                                   "Shorts pay longs" if funding < 0 else "Neutral")
+                with b:
+                    st.metric("Open interest", _compact_usd(ctx["oi_usd"]),
+                              delta=f"{change:+.2f}% / 1h" if change is not None else None)
+                with c:
+                    if longs is not None and shorts is not None:
+                        st.metric("Long / Short accounts", f"{longs:.1f}% / {shorts:.1f}%")
+                        st.progress(min(max(longs / 100, 0), 1))
+                    else:
+                        st.metric("Long / Short accounts", "N/A")
+                if funding is not None and longs is not None:
+                    if funding > 0 and longs >= 60:
+                        pressure = "Long-heavy positioning with positive funding — watch for downside squeeze risk."
+                    elif funding < 0 and shorts is not None and shorts >= 60:
+                        pressure = "Short-heavy positioning with negative funding — watch for upside squeeze risk."
+                    else:
+                        pressure = "Mixed leverage signals — no clear directional edge."
+                    st.caption("**Market pressure:** " + pressure)
+                st.caption(f"[Coinalyze](https://coinalyze.net/) · {ctx['exchange']} · "
+                           f"{ctx['contract']} · cached 5 min")
+            if ctx.get("notes"):
+                with st.expander("Connection diagnostics", expanded=False):
+                    for note in ctx["notes"]:
+                        st.caption(note)
+
+        # Compact 24-hour directional heuristic. Never describe this as
+        # a probability or a verified trading edge. Uses fresh sources only.
+        daily_for_outlook = load_data(symbol, "1mo")
+        daily_closes = (daily_for_outlook["Close"]
+                        if has_data(daily_for_outlook, ["Close"]) else [])
+        # Ensure ctx exists if Coinalyze is not configured.
+        context_for_outlook = ctx if api_key else {}
+        # Zones are retrieved once below, but cached across reruns.
+        zones = fetch_modeled_liquidation_zones(ASSET_TICKER)
+        outlook = compute_directional_outlook(
+            context_for_outlook, zones, daily_closes,
+            etf_rows if "etf_rows" in locals() else [],
+        )
+        st.markdown("**🧭 24-hour directional outlook**")
+        if outlook["ready"]:
+            left, right = st.columns([2, 1])
+            with left:
+                if outlook["direction"] == "Bullish lean":
+                    st.markdown(f"### 🟢 {outlook['icon']} {outlook['direction']}")
+                elif outlook["direction"] == "Bearish lean":
+                    st.markdown(f"### 🔴 {outlook['icon']} {outlook['direction']}")
+                else:
+                    st.markdown(f"### 🟡 {outlook['icon']} {outlook['direction']}")
+                st.caption("Rule-based reading of market pressure; not a trade recommendation.")
+            with right:
+                st.metric("Upside directional score", f"{outlook['up_score']}/100")
+                st.caption(f"Downside: {outlook['down_score']}/100 · "
+                           "NOT % chance of a move")
+            st.progress(outlook["up_score"] / 100)
+            st.caption(f"Data coverage: {outlook['coverage']:.0%} of configured signal weights"
+                       " · Some inputs update less frequently than others.")
+        else:
+            st.info(outlook["reason"])
+            st.caption(f"Data coverage: {outlook['coverage']:.0%} · "
+                       "No directional score shown when too much information is missing.")
+        with st.expander("🔎 Why this direction?", expanded=False):
+            for component in outlook["components"]:
+                lean = ("up" if component["signal"] > .05 else
+                        "down" if component["signal"] < -.05 else "neutral")
+                st.markdown(f"**{component['name']}** — {lean}: {component['detail']}")
+            if context_for_outlook.get("oi_change_pct") is not None:
+                st.caption("Open interest changes the strength of other signals; "
+                           "it does not independently select a direction.")
+            st.caption("Fixed heuristic weights: price 35%, modeled liquidation zones 30%, "
+                       "ETF flows 15%, funding 10%, account positioning 10%. "
+                       "Missing signals reduce coverage. This score is not calibrated "
+                       "or validated on future returns.")
+        st.divider()
+
+        st.markdown("**Estimated liquidation zones (24h model)**")
+        if zones["valid"]:
+            z1, z2 = st.columns(2)
+            with z1:
+                level = zones["long"]
+                if level:
+                    st.metric("▼ Longs at risk below", f"${level['price']:,.0f}",
+                              delta=f"{level['distance_pct']:+.2f}% vs model price", delta_color="off")
+                    st.caption(f"Estimated cluster: {_compact_usd(level['usd'])}")
+                else:
+                    st.metric("▼ Longs at risk below", "N/A")
+            with z2:
+                level = zones["short"]
+                if level:
+                    st.metric("▲ Shorts at risk above", f"${level['price']:,.0f}",
+                              delta=f"{level['distance_pct']:+.2f}% vs model price", delta_color="off")
+                    st.caption(f"Estimated cluster: {_compact_usd(level['usd'])}")
+                else:
+                    st.metric("▲ Shorts at risk above", "N/A")
+            st.caption(f"[Swolecharts modeled liquidation levels]"
+                       f"(https://swolecharts.com/liquidation-map/{ASSET_TICKER})"
+                       f" · snapshot {zones['asof']} · reference ${zones['price']:,.0f}"
+                       f" · model {zones['version']}")
+        else:
+            st.caption("Live modeled zones unavailable: " + zones["reason"])
+            st.markdown(f"[View the free {ASSET_TICKER} liquidation map]"
+                        f"(https://swolecharts.com/liquidation-map/{ASSET_TICKER})")
+        st.caption("Clusters are estimates, not actual orders or predicted price targets. "
+                   "Different providers cover different markets.")
+
+        with st.expander("📖 How to read these indicators", expanded=False):
+            st.markdown("**Funding:** A positive rate means longs pay shorts; a negative rate "
+                        "means shorts pay longs. It reflects the perpetual futures market, "
+                        "not the probability of an up/down move.")
+            st.markdown("**Open interest:** Total outstanding futures exposure. The hourly "
+                        "change shows whether exposure is growing or shrinking, not which side wins.")
+            st.markdown("**Long/short accounts:** Fraction of tracked accounts net long or short. "
+                        "This is not the proportion of money on each side.")
+            st.markdown("**Liquidation zones:** Modeled concentrations below price represent "
+                        "longs at risk if price falls; concentrations above represent shorts "
+                        "at risk if price rises. These are estimates and change over time.")
+            st.caption("Coinalyze measures a single exchange contract. Swolecharts estimates "
+                       "multiple exchanges using different data and assumptions. These "
+                       "numbers cannot be summed or treated as a calibrated forecast.")
+        st.caption("Read-only analysis. No trades or changes to scheduled forecasting.")
 
 # -----------------------------
 # Volume
