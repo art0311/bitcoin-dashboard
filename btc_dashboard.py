@@ -216,6 +216,159 @@ def fetch_ethereum_etf_history():
 
 
 # -----------------------------
+# Derivatives-market context (public exchange APIs; no trading credentials).
+# These indicators do NOT contain a liquidation heatmap or predicted probability.
+# A whole provider's snapshot is used rather than mixing exchange populations.
+# -----------------------------
+def _market_float(value):
+    try:
+        result = float(value)
+        return result if np.isfinite(result) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_utc_ms(value):
+    try:
+        return pd.to_datetime(int(value), unit="ms", utc=True).strftime("%Y-%m-%d %H:%M UTC")
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _market_api_json(url, params):
+    reply = requests.get(
+        url, params=params,
+        headers={"User-Agent": "CryptoDashboard/1.0", "Accept": "application/json"},
+        timeout=7,
+    )
+    reply.raise_for_status()
+    payload = reply.json()
+    if not isinstance(payload, (dict, list)):
+        raise ValueError("Unexpected API response")
+    return payload
+
+
+def _new_derivatives_result(exchange, contract):
+    return {"exchange": exchange, "contract": contract, "funding_pct": None,
+            "long_pct": None, "short_pct": None, "oi_units": None,
+            "oi_change_pct": None, "oi_period": "1h", "asof": None,
+            "available": 0, "notes": []}
+
+
+def _bybit_derivatives(symbol):
+    result = _new_derivatives_result("Bybit", symbol)
+    base = "https://api.bybit.com/v5/market/"
+    params = {"category": "linear", "symbol": symbol}
+    # A failed endpoint should not hide valid data from other endpoints.
+    try:
+        ticker = _market_api_json(base + "tickers", params)
+        if ticker.get("retCode") == 0:
+            rows = ticker.get("result", {}).get("list", [])
+            if rows:
+                rate = _market_float(rows[0].get("fundingRate"))
+                if rate is not None:
+                    result["funding_pct"] = rate * 100
+                    result["available"] += 1
+                result["asof"] = _market_utc_ms(ticker.get("time"))
+    except (requests.RequestException, ValueError, KeyError, AttributeError):
+        result["notes"].append("Funding unavailable")
+
+    try:
+        ratios = _market_api_json(base + "account-ratio",
+            {**params, "period": "1h", "limit": 2})
+        if ratios.get("retCode") == 0:
+            rows = ratios.get("result", {}).get("list", [])
+            if rows:
+                item = max(rows, key=lambda r: int(r.get("timestamp", 0)))
+                longs, shorts = _market_float(item.get("buyRatio")), _market_float(item.get("sellRatio"))
+                if longs is not None and shorts is not None and (longs + shorts) > 0:
+                    result["long_pct"] = longs / (longs + shorts) * 100
+                    result["short_pct"] = shorts / (longs + shorts) * 100
+                    result["available"] += 1
+                    result["ratio_asof"] = _market_utc_ms(item.get("timestamp"))
+    except (requests.RequestException, ValueError, KeyError, AttributeError):
+        result["notes"].append("Positioning unavailable")
+
+    try:
+        interest = _market_api_json(base + "open-interest",
+            {**params, "intervalTime": "1h", "limit": 3})
+        if interest.get("retCode") == 0:
+            rows = interest.get("result", {}).get("list", [])
+            rows = sorted(rows, key=lambda r: int(r.get("timestamp", 0)), reverse=True)
+            if rows:
+                oi_now = _market_float(rows[0].get("openInterest"))
+                if oi_now is not None:
+                    result["oi_units"] = oi_now
+                    result["available"] += 1
+                    result["oi_asof"] = _market_utc_ms(rows[0].get("timestamp"))
+                if len(rows) >= 2:
+                    oi_before = _market_float(rows[1].get("openInterest"))
+                    if oi_now is not None and oi_before and oi_before > 0:
+                        result["oi_change_pct"] = (oi_now / oi_before - 1) * 100
+    except (requests.RequestException, ValueError, KeyError, AttributeError):
+        result["notes"].append("Open interest unavailable")
+    return result
+
+
+def _binance_derivatives(symbol):
+    result = _new_derivatives_result("Binance USD-M", symbol)
+    base = "https://fapi.binance.com/"
+    try:
+        mark = _market_api_json(base + "fapi/v1/premiumIndex", {"symbol": symbol})
+        rate = _market_float(mark.get("lastFundingRate"))
+        if rate is not None:
+            result["funding_pct"] = rate * 100
+            result["available"] += 1
+        result["asof"] = _market_utc_ms(mark.get("time"))
+    except (requests.RequestException, ValueError, KeyError, AttributeError):
+        result["notes"].append("Funding unavailable")
+
+    try:
+        ratios = _market_api_json(base + "futures/data/globalLongShortAccountRatio",
+                                  {"symbol": symbol, "period": "1h", "limit": 2})
+        if isinstance(ratios, list) and ratios:
+            item = max(ratios, key=lambda r: int(r.get("timestamp", 0)))
+            longs, shorts = _market_float(item.get("longAccount")), _market_float(item.get("shortAccount"))
+            if longs is not None and shorts is not None and longs + shorts > 0:
+                result["long_pct"] = 100 * longs / (longs + shorts)
+                result["short_pct"] = 100 * shorts / (longs + shorts)
+                result["available"] += 1
+                result["ratio_asof"] = _market_utc_ms(item.get("timestamp"))
+    except (requests.RequestException, ValueError, KeyError, AttributeError):
+        result["notes"].append("Positioning unavailable")
+
+    try:
+        history = _market_api_json(base + "futures/data/openInterestHist",
+            {"symbol": symbol, "period": "1h", "limit": 3})
+        if isinstance(history, list) and history:
+            rows = sorted(history, key=lambda r: int(r.get("timestamp", 0)), reverse=True)
+            now = _market_float(rows[0].get("sumOpenInterest"))
+            if now is not None:
+                result["oi_units"] = now
+                result["available"] += 1
+                result["oi_asof"] = _market_utc_ms(rows[0].get("timestamp"))
+            if len(rows) >= 2:
+                before = _market_float(rows[1].get("sumOpenInterest"))
+                if now is not None and before and before > 0:
+                    result["oi_change_pct"] = (now / before - 1) * 100
+    except (requests.RequestException, ValueError, KeyError, AttributeError):
+        result["notes"].append("Open interest unavailable")
+    return result
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_derivatives_context(ticker):
+    """Public market data only. Never requires or handles exchange API keys."""
+    contract = ticker + "USDT"
+    bybit = _bybit_derivatives(contract)
+    # Keep a consistent exchange snapshot, prefer the most complete provider.
+    if bybit["available"] == 3:
+        return bybit
+    binance = _binance_derivatives(contract)
+    return binance if binance["available"] > bybit["available"] else bybit
+
+
+# -----------------------------
 # Sidebar
 # -----------------------------
 st.sidebar.title("⚙️ Settings")
@@ -261,7 +414,7 @@ show_indicators = st.sidebar.multiselect(
     default=indicator_options,
 )
 
-panel_options = ["Volume", "RSI", "OBV", "MACD", "AI Forecast"]
+panel_options = ["Leverage & Liquidations", "Volume", "RSI", "OBV", "MACD", "AI Forecast"]
 show_panels = st.sidebar.multiselect(
     "Panels to show",
     panel_options,
@@ -642,6 +795,79 @@ if has_data(btc, ["Close"]):
     plt.close(fig)
 else:
     st.info("Not enough data to plot price.")
+
+# -----------------------------
+# Leverage & Liquidation Analysis — experimental, read-only.
+# Real exchange metrics; estimated future liquidation zones require an
+# independent licensed dataset. No fabricated heatmap or probability.
+# -----------------------------
+if "Leverage & Liquidations" in show_panels:
+    st.subheader(f"⚖️ {ASSET_TICKER} Leverage & Liquidation Analysis")
+    st.caption(
+        "Perpetual futures market context, not a buy/sell signal. "
+        "Metrics describe one exchange's BTCUSDT/ETHUSDT contract, not the entire market."
+    )
+    with st.expander("📊 Funding · Open Interest · Long/Shorts · Liquidation zones", expanded=True):
+        market_ctx = fetch_derivatives_context(ASSET_TICKER)
+        if market_ctx["available"] == 0:
+            st.warning("Exchange futures data is unavailable from this deployment. "
+                       "Public endpoints may be restricted by exchange or hosting location.")
+            st.caption("No values are estimated or filled in when the feed fails.")
+        else:
+            st.caption(f"Data source: {market_ctx['exchange']} · "
+                       f"{market_ctx['contract']} perpetual · cached up to 5 min")
+            funding = market_ctx["funding_pct"]
+            oi_change = market_ctx["oi_change_pct"]
+            oi_units = market_ctx["oi_units"]
+            long_pct = market_ctx["long_pct"]
+            short_pct = market_ctx["short_pct"]
+
+            a, b, c = st.columns(3)
+            with a:
+                st.metric("Funding rate", f"{funding:+.4f}%" if funding is not None else "N/A")
+                if funding is not None:
+                    funding_side = ("Longs pay shorts" if funding > 0 else
+                                    "Shorts pay longs" if funding < 0 else "Neutral")
+                    st.caption(funding_side + " · next/current quoted rate")
+            with b:
+                st.metric("Open interest (contracts in coin)",
+                    f"{oi_units:,.0f} {ASSET_TICKER}" if oi_units is not None else "N/A",
+                    delta=f"{oi_change:+.2f}% vs previous 1h" if oi_change is not None else None)
+                st.caption("Outstanding futures exposure; both sides, not only longs")
+            with c:
+                if long_pct is not None and short_pct is not None:
+                    st.metric("Accounts long / short", f"{long_pct:.1f}% / {short_pct:.1f}%")
+                    st.progress(min(max(long_pct / 100, 0), 1))
+                else:
+                    st.metric("Accounts long / short", "N/A")
+                st.caption("Account counts, not share of dollars or probability")
+
+            timestamps = [(label, market_ctx.get(key)) for label, key in
+                [("Funding", "asof"), ("Positioning", "ratio_asof"),
+                 ("Open interest", "oi_asof")] if market_ctx.get(key)]
+            if timestamps:
+                st.caption("Reported: " + " · ".join(f"{label} {stamp}" for label, stamp in timestamps))
+
+            # Context only; no invented formula converting these into probabilities.
+            if funding is not None and long_pct is not None:
+                if funding > 0 and long_pct >= 60:
+                    st.info("Context: long positioning is crowded and longs pay funding. "
+                            "A sudden decline may amplify liquidations, but direction is not predicted.")
+                elif funding < 0 and short_pct >= 60:
+                    st.info("Context: short positioning is crowded and shorts pay funding. "
+                            "A sudden rise may trigger a short squeeze, but direction is not predicted.")
+                else:
+                    st.info("Context: funding and positioning alone do not establish price direction. "
+                            "Use price action and risk levels alongside these readings.")
+
+        st.markdown("**Liquidation concentrations above / below price**")
+        st.caption("Not available in this free-data version. Historical liquidations, "
+                   "funding, and open interest cannot be converted into reliable liquidation "
+                   "price clusters without a dedicated liquidation model and additional data.")
+        st.markdown("[View modeled liquidation heatmap on CoinGlass]"
+                    "(https://www.coinglass.com/LiquidationHeatMap)")
+        st.caption("No orders are placed. No account access, API secrets, or changes "
+                   "to the automated forecast scheduler are involved.")
 
 # -----------------------------
 # Volume
