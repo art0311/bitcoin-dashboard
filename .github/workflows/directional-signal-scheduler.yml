@@ -2,8 +2,6 @@ name: BTC Directional Signal - 24h Tracker
 
 # Separate workflow; existing Phase 3 schedule stays untouched.
 on:
-  schedule:
-    - cron: '17,47 * * * *' # Requested every 30 minutes; GitHub may delay/skip
   workflow_dispatch:
     inputs:
       mode:
@@ -29,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: feature/coinglass-api
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
