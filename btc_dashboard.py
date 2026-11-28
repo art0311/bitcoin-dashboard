@@ -397,6 +397,82 @@ def fetch_coinalyze_context(ticker, key):
     return result
 
 
+
+# -----------------------------
+# Independent, public model-estimated liquidation clusters.
+# No exchange publishes centralized users' true liquidation levels.
+# Do not mix these estimates with Coinalyze contract-specific OI.
+# -----------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_modeled_liquidation_zones(ticker):
+    result = {"valid": False, "reason": "Unavailable", "price": None,
+              "long": None, "short": None, "asof": None, "version": None}
+    if ticker not in ("BTC", "ETH"):
+        return result
+    try:
+        response = requests.get(
+            f"https://swolecharts.com/api/liquidation-levels/{ticker}",
+            params={"range": "24h"},
+            headers={"Accept": "application/json", "User-Agent": "CryptoDashboard/1.0"},
+            timeout=12,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or data.get("estimated") is not True or data.get("has_data") is not True:
+            result["reason"] = "Provider has no usable model snapshot."
+            return result
+        if str(data.get("coin", "")).upper() != ticker:
+            result["reason"] = "Provider coin mismatch."
+            return result
+        reference = _market_float(data.get("price"))
+        stamp = _market_float(data.get("as_of"))
+        if reference is None or reference <= 0 or stamp is None:
+            result["reason"] = "Missing price or timestamp."
+            return result
+        asof = datetime.fromtimestamp(stamp / 1000 if stamp > 1e11 else stamp, tz=timezone.utc)
+        age = (datetime.now(timezone.utc) - asof).total_seconds()
+        if age < -300 or age > 2 * 3600:
+            result["reason"] = "Snapshot is older than 2 hours or its timestamp is invalid."
+            return result
+        levels = data.get("levels", {})
+        if not isinstance(levels, dict):
+            result["reason"] = "No levels in provider response."
+            return result
+        for side in ("long", "short"):
+            candidates = []
+            for item in levels.get(side, []):
+                if not isinstance(item, dict):
+                    continue
+                mid = _market_float(item.get("mid"))
+                usd = _market_float(item.get("usd"))
+                if mid is None or usd is None or usd <= 0:
+                    continue
+                if (side == "long" and mid >= reference) or (side == "short" and mid <= reference):
+                    continue
+                # Select the most intense reported zone, not the nearest by price.
+                candidates.append({"price": mid, "usd": usd,
+                                   "distance_pct": 100 * (mid / reference - 1)})
+            if candidates:
+                result[side] = max(candidates, key=lambda x: x["usd"])
+        result.update({"valid": bool(result["long"] or result["short"]),
+                       "price": reference, "asof": asof.strftime("%Y-%m-%d %H:%M UTC"),
+                       "version": str(data.get("model_version") or "unknown")[:70],
+                       "reason": "No qualifying zones in the current estimate."})
+        return result
+    except (requests.RequestException, ValueError, TypeError, OverflowError, OSError) as exc:
+        result["reason"] = f"Liquidation data request unavailable ({type(exc).__name__})."
+        return result
+
+
+def _compact_usd(value):
+    if value is None:
+        return "N/A"
+    if abs(value) >= 1e9:
+        return f"${value / 1e9:,.2f}B"
+    if abs(value) >= 1e6:
+        return f"${value / 1e6:,.1f}M"
+    return f"${value:,.0f}"
+
 # -----------------------------
 # Sidebar
 # -----------------------------
@@ -826,80 +902,105 @@ else:
     st.info("Not enough data to plot price.")
 
 # -----------------------------
-# Leverage & Liquidation Analysis — read-only, no trading.
+# Leverage & Liquidation Analysis — compact, read-only, no trading.
+# Coinalyze metrics refer to ONE exchange perpetual; liquidation zones
+# are independent modeled estimates of positions from multiple venues.
 # -----------------------------
 if "Leverage & Liquidations" in show_panels:
     st.subheader(f"⚖️ {ASSET_TICKER} Leverage & Liquidation Analysis")
-    st.caption("Futures positioning for one perpetual contract. This does not predict price direction.")
-    with st.expander("📊 Funding · Open Interest · Long/Shorts · Liquidation zones", expanded=True):
+    with st.expander("📊 Market pressure · Liquidation zones", expanded=True):
         api_key = _coinalyze_key()
         if not api_key:
-            st.info("Coinalyze is ready to connect. Add COINALYZE_API_KEY to your development app's Streamlit Secrets.")
-            st.markdown("[Generate a free Coinalyze API key](https://coinalyze.net/account/api-key/)")
-            st.caption("No live futures values are shown until the key is configured.")
+            st.info("Add COINALYZE_API_KEY to your development Streamlit Secrets to show live futures metrics.")
+            st.markdown("[Get your free Coinalyze key](https://coinalyze.net/account/api-key/)")
         else:
-            market_ctx = fetch_coinalyze_context(ASSET_TICKER, api_key)
-            if market_ctx["available"] == 0:
-                st.warning("Coinalyze did not return usable futures data for this contract.")
-                if market_ctx.get("fatal"):
-                    st.caption("Diagnostic: " + market_ctx["fatal"])
+            ctx = fetch_coinalyze_context(ASSET_TICKER, api_key)
+            if not ctx["available"]:
+                st.warning("Futures metrics are currently unavailable.")
+                if ctx.get("fatal"):
+                    with st.expander("Connection diagnostics"):
+                        st.caption(ctx["fatal"])
             else:
-                st.caption(f"Source: [Coinalyze](https://coinalyze.net/) · "
-                           f"{market_ctx['exchange']} · {market_ctx['contract']} · cached 5 minutes")
-                funding = market_ctx["funding_pct"]
-                oi_change = market_ctx["oi_change_pct"]
-                oi_usd = market_ctx["oi_usd"]
-                long_pct = market_ctx["long_pct"]
-                short_pct = market_ctx["short_pct"]
-
+                funding = ctx["funding_pct"]
+                change = ctx["oi_change_pct"]
+                longs = ctx["long_pct"]
+                shorts = ctx["short_pct"]
                 a, b, c = st.columns(3)
                 with a:
-                    st.metric("Funding rate", f"{funding:+.4f}%" if funding is not None else "N/A")
+                    st.metric("Funding", f"{funding:+.4f}%" if funding is not None else "N/A")
                     if funding is not None:
                         st.caption("Longs pay shorts" if funding > 0 else
                                    "Shorts pay longs" if funding < 0 else "Neutral")
-                    st.caption("Provider-reported rate; settlement interval varies by contract")
                 with b:
-                    st.metric("Open interest (USD)",
-                              f"${oi_usd/1e9:,.2f}B" if oi_usd is not None and oi_usd >= 1e9 else
-                              f"${oi_usd/1e6:,.1f}M" if oi_usd is not None else "N/A",
-                              delta=f"{oi_change:+.2f}% hourly" if oi_change is not None else None)
-                    st.caption("Both long and short exposure; 1h change from historical snapshots")
+                    st.metric("Open interest", _compact_usd(ctx["oi_usd"]),
+                              delta=f"{change:+.2f}% / 1h" if change is not None else None)
                 with c:
-                    if long_pct is not None and short_pct is not None:
-                        st.metric("Accounts long / short", f"{long_pct:.1f}% / {short_pct:.1f}%")
-                        st.progress(min(max(long_pct / 100, 0), 1))
+                    if longs is not None and shorts is not None:
+                        st.metric("Long / Short accounts", f"{longs:.1f}% / {shorts:.1f}%")
+                        st.progress(min(max(longs / 100, 0), 1))
                     else:
-                        st.metric("Accounts long / short", "N/A")
-                    st.caption("Trader-account distribution; not a probability")
-
-                timestamps = [(label, market_ctx.get(key)) for label, key in
-                    [("Funding", "asof"), ("Positioning", "ratio_asof"),
-                     ("Open interest", "oi_asof")] if market_ctx.get(key)]
-                if timestamps:
-                    st.caption("Reported: " + " · ".join(f"{label} {stamp}" for label, stamp in timestamps))
-
-                if funding is not None and long_pct is not None:
-                    if funding > 0 and long_pct >= 60:
-                        st.info("Crowded longs + positive funding: potential downside squeeze vulnerability, "
-                                "not a prediction of falling prices.")
-                    elif funding < 0 and short_pct >= 60:
-                        st.info("Crowded shorts + negative funding: potential upside squeeze vulnerability, "
-                                "not a prediction of rising prices.")
+                        st.metric("Long / Short accounts", "N/A")
+                if funding is not None and longs is not None:
+                    if funding > 0 and longs >= 60:
+                        pressure = "Long-heavy positioning with positive funding — watch for downside squeeze risk."
+                    elif funding < 0 and shorts is not None and shorts >= 60:
+                        pressure = "Short-heavy positioning with negative funding — watch for upside squeeze risk."
                     else:
-                        st.info("Mixed leverage signals: positioning alone does not determine direction.")
-
-            if market_ctx.get("notes"):
+                        pressure = "Mixed leverage signals — no clear directional edge."
+                    st.caption("**Market pressure:** " + pressure)
+                st.caption(f"[Coinalyze](https://coinalyze.net/) · {ctx['exchange']} · "
+                           f"{ctx['contract']} · cached 5 min")
+            if ctx.get("notes"):
                 with st.expander("Connection diagnostics", expanded=False):
-                    for note in market_ctx["notes"]:
+                    for note in ctx["notes"]:
                         st.caption(note)
 
-        st.markdown("**Potential liquidation zones above/below price**")
-        st.caption("Modeled future liquidation clusters are not available through this feed. "
-                   "Historical liquidation volumes are different from a liquidation heatmap.")
-        st.markdown("[Open the CoinGlass liquidation heatmap]"
-                    "(https://www.coinglass.com/LiquidationHeatMap)")
-        st.caption("Read-only market data. No exchange trading credentials, orders, or scheduler changes.")
+        st.markdown("**Estimated liquidation zones (24h model)**")
+        zones = fetch_modeled_liquidation_zones(ASSET_TICKER)
+        if zones["valid"]:
+            z1, z2 = st.columns(2)
+            with z1:
+                level = zones["long"]
+                if level:
+                    st.metric("▼ Longs at risk below", f"${level['price']:,.0f}",
+                              delta=f"{level['distance_pct']:+.2f}% vs model price", delta_color="off")
+                    st.caption(f"Estimated cluster: {_compact_usd(level['usd'])}")
+                else:
+                    st.metric("▼ Longs at risk below", "N/A")
+            with z2:
+                level = zones["short"]
+                if level:
+                    st.metric("▲ Shorts at risk above", f"${level['price']:,.0f}",
+                              delta=f"{level['distance_pct']:+.2f}% vs model price", delta_color="off")
+                    st.caption(f"Estimated cluster: {_compact_usd(level['usd'])}")
+                else:
+                    st.metric("▲ Shorts at risk above", "N/A")
+            st.caption(f"[Swolecharts modeled liquidation levels]"
+                       f"(https://swolecharts.com/liquidation-map/{ASSET_TICKER})"
+                       f" · snapshot {zones['asof']} · reference ${zones['price']:,.0f}"
+                       f" · model {zones['version']}")
+        else:
+            st.caption("Live modeled zones unavailable: " + zones["reason"])
+            st.markdown(f"[View the free {ASSET_TICKER} liquidation map]"
+                        f"(https://swolecharts.com/liquidation-map/{ASSET_TICKER})")
+        st.caption("Clusters are estimates, not actual orders or predicted price targets. "
+                   "Different providers cover different markets.")
+
+        with st.expander("📖 How to read these indicators", expanded=False):
+            st.markdown("**Funding:** A positive rate means longs pay shorts; a negative rate "
+                        "means shorts pay longs. It reflects the perpetual futures market, "
+                        "not the probability of an up/down move.")
+            st.markdown("**Open interest:** Total outstanding futures exposure. The hourly "
+                        "change shows whether exposure is growing or shrinking, not which side wins.")
+            st.markdown("**Long/short accounts:** Fraction of tracked accounts net long or short. "
+                        "This is not the proportion of money on each side.")
+            st.markdown("**Liquidation zones:** Modeled concentrations below price represent "
+                        "longs at risk if price falls; concentrations above represent shorts "
+                        "at risk if price rises. These are estimates and change over time.")
+            st.caption("Coinalyze measures a single exchange contract. Swolecharts estimates "
+                       "multiple exchanges using different data and assumptions. These "
+                       "numbers cannot be summed or treated as a calibrated forecast.")
+        st.caption("Read-only analysis. No trades or changes to scheduled forecasting.")
 
 # -----------------------------
 # Volume
