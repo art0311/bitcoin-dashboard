@@ -1,0 +1,51 @@
+name: BTC Directional Signal - 24h Tracker
+
+# Separate workflow; existing Phase 3 schedule stays untouched.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Dry run (no writes) or save to Supabase'
+        type: choice
+        required: true
+        default: dry_run
+        options: [dry_run, save]
+permissions:
+  contents: read
+concurrency:
+  group: btc-directional-snapshot
+  cancel-in-progress: false
+jobs:
+  directional-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
+      SAVE_MODE: ${{ github.event_name == 'schedule' || inputs.mode == 'save' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/coinglass-api
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Dependencies
+        run: python -m pip install --disable-pip-version-check numpy pandas yfinance requests
+      - name: Compile new tracker
+        run: python -m py_compile directional_score_core.py directional_sources.py directional_score_storage.py directional_score_job.py
+      - name: Check secrets
+        run: |
+          test -n "$SUPABASE_URL" || { echo 'Missing SUPABASE_URL'; exit 1; }
+          test -n "$SUPABASE_KEY" || { echo 'Missing SUPABASE_KEY'; exit 1; }
+          test -n "$COINALYZE_API_KEY" || { echo 'Missing COINALYZE_API_KEY'; exit 1; }
+      - name: Capture new signal and evaluate matured records
+        shell: bash
+        run: |
+          if [[ "$SAVE_MODE" == "true" ]]; then
+            python directional_score_job.py --save
+          else
+            python directional_score_job.py
+          fi
